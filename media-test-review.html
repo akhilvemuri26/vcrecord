@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Independent review: microphone and camera test</title>
+<style>body{max-width:860px;margin:48px auto;padding:0 24px;font:16px/1.6 system-ui,sans-serif;color:#252525;background:#fff}h1,h2{line-height:1.25}h1{font-size:30px}h2{font-size:21px;margin-top:30px}code{font-size:14px;background:#f3f3f3;padding:2px 4px}li{margin:9px 0}.verdict{padding:16px 20px;border-left:4px solid #39764b;background:#f1f7f2}a{color:#315a78}</style>
+<h1>Independent review: microphone and camera test</h1>
+<p>October 14, 2026 · Repository: <code>/Users/akhilvemuri/coding/vcrecord</code></p>
+<p class="verdict"><strong>Approved.</strong> No actionable correctness, privacy, or regression finding was identified in the reviewed feature diff. This is a code and evidence review, not confirmation that the original device-specific transcription failure has been diagnosed.</p>
+<h2>Scope</h2>
+<p>Reviewed the <a href="media-test-plan.html">implementation plan</a>, <a href="media-test-handoff.html">implementation handoff</a>, all changed production files, the new audio-analysis helper, changed capture tests, and new worker and browser checks. Inspected the implementation manager’s 375 px mobile screenshot. No application source was changed during review.</p>
+<h2>Review conclusions</h2>
+<ul>
+<li><strong>Shared capture and practice behavior:</strong> the dedicated test entry point uses the existing camera, MediaRecorder, and recognition PCM pipeline. Only test mode selects immediate recording and a five-second duration. Practice retains its validation, 15-second preparation/20-second answer defaults, preparation gating, and Stop &amp; save behavior.</li>
+<li><strong>Cancellation and stale callbacks:</strong> setup cancellation races retain late permission-grant cleanup. Active tests discard recorder output on stop, abort, hidden page, pagehide, or track loss. Cancellation also resolves a pending PCM flush and suppresses final completion. UI generation checks protect close/retest/navigation transitions, and cleanup releases tracks, the audio graph, timers, and listeners. Closing clears playback and revokes its object URL.</li>
+<li><strong>Ephemeral sample:</strong> test completion creates only an in-memory playback URL and diagnostic text. It has no save, answer enqueue, or upload call. New practice closes the test before setup, and existing unsaved-answer protection prevents a new test. Sharing and rescue implementation remain unchanged.</li>
+<li><strong>Recognition diagnostics:</strong> missing PCM, exact-zero input, empty recognized text, and recognition errors remain distinguishable. Nonzero quiet or brief audio reaches Whisper rather than the former RMS threshold. Existing silent records receive neutral fallback wording, while existing status/storage schemas remain compatible.</li>
+<li><strong>Interface:</strong> preview is muted; playback has controls and is not audibly autoplayed. The PCM meter is labeled without a live announcement stream. Phase/result text is announced separately. Opening and closing manage focus, and the reviewed mobile screenshot shows a readable panel without horizontal clipping.</li>
+</ul>
+<h2>Validation and evidence boundaries</h2>
+<p>The reviewer independently ran <code>git diff --check</code>, which passed, and traced the implementation and focused test assertions. No duplicate broad suite, build, browser session, or model inference was launched.</p>
+<p>The implementation manager reports 67/67 Node tests and a production build passing under pinned Node 22.23.0, plus synthetic Chromium checks for preview, meter, playback, cleanup, cancellation, missing/zero PCM, no test answer persistence or upload, and normal practice afterward. The reviewed scripts exercise those behaviors. The manager also reports actual Whisper recognition of known speech scaled to RMS 0.001, below the removed 0.003 cutoff. These execution results are attributed to the handoff, not independently rerun here.</p>
+<p>Synthetic browser media does not verify the user’s physical microphone, camera, browser settings, or original recording. The reported infinite WebM duration metadata does not independently prove clip length; deterministic capture tests verify the five-second deadline. Input detection is deliberately not presented as proof of intelligible speech or successful recognition.</p>
+<h2>Handoff</h2>
+<p>No correction cycle is requested. No private invite or user recordings were read, no real team data was mutated, and no commit, push, deployment, or no-mistakes pipeline was performed by this reviewer. No localhost server or browser process was started during review.</p>
+</html>

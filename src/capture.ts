@@ -1,3 +1,5 @@
+import { audioRms } from './audio-analysis.ts';
+
 export interface CaptureResult {
   video: Blob;
   audio: Float32Array;
@@ -6,7 +8,7 @@ export interface CaptureResult {
 }
 
 export interface CaptureHandle {
-  /** Cancels setup/preparation, or stops and saves an active answer. */
+  /** Practice saves an active answer; a media test always discards on stop. */
   stop: () => void;
 }
 
@@ -16,6 +18,8 @@ export interface CaptureOptions {
   signal?: AbortSignal;
   onPhase?: (phase: 'preparing' | 'recording') => void;
   onCancelled?: () => void;
+  /** RMS of recognition PCM, reported at most once per 100 ms. */
+  onAudioLevel?: (level: number) => void;
 }
 
 function recordingMime(): string | undefined {
@@ -44,10 +48,32 @@ export async function startCapture(
   onError: (error: Error) => void,
   options: CaptureOptions = {},
 ): Promise<CaptureHandle> {
-  const preparationSeconds = options.preparationSeconds ?? 15;
-  const answerSeconds = options.answerSeconds ?? 20;
-  if (!Number.isInteger(preparationSeconds) || preparationSeconds < 1 || preparationSeconds > 120 ||
-      !Number.isInteger(answerSeconds) || answerSeconds < 5 || answerSeconds > 30) {
+  return startCaptureSession(preview, onTick, onFinished, onError, options, false);
+}
+
+/** Runs the same capture pipeline immediately for five seconds, without practice preparation. */
+export function startMediaTest(
+  preview: HTMLVideoElement,
+  onTick: (remaining: number) => void,
+  onFinished: (result: CaptureResult) => void,
+  onError: (error: Error) => void,
+  options: Pick<CaptureOptions, 'signal' | 'onPhase' | 'onCancelled' | 'onAudioLevel'> = {},
+): Promise<CaptureHandle> {
+  return startCaptureSession(preview, onTick, onFinished, onError, options, true);
+}
+
+async function startCaptureSession(
+  preview: HTMLVideoElement,
+  onTick: (remaining: number) => void,
+  onFinished: (result: CaptureResult) => void,
+  onError: (error: Error) => void,
+  options: CaptureOptions,
+  testMode: boolean,
+): Promise<CaptureHandle> {
+  const preparationSeconds = testMode ? 0 : options.preparationSeconds ?? 15;
+  const answerSeconds = testMode ? 5 : options.answerSeconds ?? 20;
+  if (!testMode && (!Number.isInteger(preparationSeconds) || preparationSeconds < 1 || preparationSeconds > 120 ||
+      !Number.isInteger(answerSeconds) || answerSeconds < 5 || answerSeconds > 30)) {
     throw new Error('Preparation must be 1–120 whole seconds and answer must be 5–30 whole seconds.');
   }
   if (!navigator.mediaDevices?.getUserMedia || !globalThis.MediaRecorder) {
@@ -65,8 +91,12 @@ export async function startCapture(
   let cancelled = false;
   let recording = false;
   let finished = false;
+  let finalizing = false;
+  let discardRecorder: (() => void) | undefined;
   let stopping = false;
   let tickTimer: ReturnType<typeof setInterval> | undefined;
+  let pcmFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  let resolvePcmFlush: (() => void) | undefined;
   let finalizationTimer: ReturnType<typeof setTimeout> | undefined;
   let stopRecording: (() => void) | undefined;
   let rejectCancellation!: (error: Error) => void;
@@ -91,6 +121,8 @@ export async function startCapture(
   const cleanup = () => {
     if (tickTimer !== undefined) clearInterval(tickTimer);
     if (finalizationTimer !== undefined) clearTimeout(finalizationTimer);
+    if (pcmFlushTimer !== undefined) clearTimeout(pcmFlushTimer);
+    resolvePcmFlush?.();
     removeLifecycleListeners();
     window.removeEventListener('beforeunload', warnBeforeUnload);
     if (worklet) worklet.port.onmessage = null;
@@ -98,8 +130,9 @@ export async function startCapture(
   };
   function stopForLifecycle() {
     if (finished || cancelled) return;
-    if (recording) { stopRecording?.(); return; }
+    if (recording && !testMode) { stopRecording?.(); return; }
     cancelled = true;
+    discardRecorder?.();
     cleanup();
     rejectCancellation(cancellationError);
     options.onCancelled?.();
@@ -154,30 +187,43 @@ export async function startCapture(
 
     const pcmChunks: Float32Array[] = [];
     const videoChunks: Blob[] = [];
-    let resolvePcmFlush: (() => void) | undefined;
+    let lastLevelAt = -Infinity;
     worklet.port.onmessage = (event: MessageEvent<Float32Array | 'flushed'>) => {
-      if (event.data instanceof Float32Array) pcmChunks.push(event.data);
+      if (cancelled || finished) return;
+      if (event.data instanceof Float32Array) {
+        pcmChunks.push(event.data);
+        const now = performance.now();
+        if (!stopping && now - lastLevelAt >= 100) {
+          lastLevelAt = now;
+          options.onAudioLevel?.(audioRms(event.data));
+        }
+      }
       else if (event.data === 'flushed') resolvePcmFlush?.();
     };
     const mimeChoice = recordingMime();
     const recorder = new MediaRecorder(stream, mimeChoice ? { mimeType: mimeChoice } : undefined);
+    discardRecorder = () => {
+      try { if (recorder.state !== 'inactive') recorder.stop(); } catch { /* Cancellation discards all output. */ }
+    };
     let startedAt = 0;
     let stoppedAt = 0;
     let recordingError: Error | undefined;
     const finalize = async () => {
-      if (finished || cancelled) return;
-      finished = true;
+      if (finished || cancelled || finalizing) return;
+      finalizing = true;
       const duration = Math.max(0, (stoppedAt || performance.now()) - startedAt) / 1000;
       const mime = recorder.mimeType || videoChunks.find((chunk) => chunk.type)?.type || 'video/webm';
       const video = new Blob(videoChunks, { type: mime });
       await new Promise<void>((resolve) => {
-        const timeout = setTimeout(resolve, 250);
-        resolvePcmFlush = () => { clearTimeout(timeout); resolve(); };
+        pcmFlushTimer = setTimeout(resolve, 250);
+        resolvePcmFlush = () => { clearTimeout(pcmFlushTimer); resolve(); };
         try { worklet!.port.postMessage('stop'); worklet!.port.postMessage('flush'); }
-        catch { clearTimeout(timeout); resolve(); }
+        catch { clearTimeout(pcmFlushTimer); resolve(); }
       });
       const audio = joinPcm(pcmChunks);
       cleanup();
+      if (cancelled) return;
+      finished = true;
       if (video.size > 0) onFinished({ video, audio, duration, mime });
       else onError(recordingError ?? new Error('The recording was empty. Check camera and microphone access, then try again.'));
     };
@@ -200,9 +246,10 @@ export async function startCapture(
     }
     stopRecording = requestStop;
     recorder.addEventListener('dataavailable', (event) => {
-      if (event.data.size > 0) videoChunks.push(event.data);
+      if (!cancelled && event.data.size > 0) videoChunks.push(event.data);
     });
     recorder.addEventListener('error', (event) => {
+      if (cancelled || finished) return;
       recordingError = (event as Event & { error?: Error }).error ?? new Error('The browser reported a recording error.');
       if (recording) requestStop();
       else { finished = true; cleanup(); onError(recordingError); }
@@ -216,9 +263,9 @@ export async function startCapture(
         recording = true;
         startedAt = performance.now();
         worklet!.port.postMessage('start');
-        window.addEventListener('beforeunload', warnBeforeUnload);
+        if (!testMode) window.addEventListener('beforeunload', warnBeforeUnload);
         options.onPhase?.('recording');
-        if (!stopping && !finished) onTick(answerSeconds);
+        if (!stopping && !finished && !cancelled) onTick(answerSeconds);
       } catch (error) {
         if (cancelled) return;
         finished = true;
@@ -228,11 +275,12 @@ export async function startCapture(
     };
     checkSetup();
     const preparationDeadline = performance.now() + preparationSeconds * 1000;
-    options.onPhase?.('preparing');
-    if (!cancelled && !finished) {
-      onTick(preparationSeconds);
+    if (testMode) beginRecording();
+    else {
+      options.onPhase?.('preparing');
+      if (!cancelled && !finished) onTick(preparationSeconds);
     }
-    if (!cancelled && !finished) {
+    if (!cancelled && !finished && !stopping) {
       tickTimer = setInterval(() => {
         if (cancelled || finished || stopping) return;
         if (!recording) {

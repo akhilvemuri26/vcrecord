@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Mic and video test plan</title>
+<style>body{max-width:860px;margin:48px auto;padding:0 24px;font:16px/1.6 system-ui,sans-serif;color:#252525}h1,h2{line-height:1.2}h1{font-size:32px}h2{font-size:21px;margin-top:32px}code{font-size:14px;background:#f3f3f3;padding:2px 4px}li{margin:8px 0}p{margin:14px 0}.note{padding:16px 20px;background:#f6f6f6;border-left:3px solid #777}</style>
+<h1>Test microphone and camera before practice</h1>
+<p>Implementation plan · October 14, 2026 · Repository: <code>/Users/akhilvemuri/coding/vcrecord</code></p>
+<p>Add a small “Test mic &amp; video” control beside Start practice. It opens a live camera preview, displays the microphone level, records a five-second sample, and offers normal video playback with sound. The sample stays in memory and is never saved as an answer or uploaded. No name or team is required.</p>
+<h2>What the investigation established</h2>
+<ul>
+<li><code>src/capture.ts</code> records video with MediaRecorder while a separate AudioWorklet collects mono 16 kHz PCM for transcription. Audible video alone therefore does not prove the transcription PCM path is working.</li>
+<li><code>src/transcribe.worker.ts</code> currently skips recognition when whole-clip RMS is below 0.003. Quiet speech or brief speech surrounded by silence can fall below this threshold. It also reports both an empty PCM buffer and an empty model transcript as the same <code>silent</code> status.</li>
+<li><code>src/main.ts</code> renders these distinct conditions as “No speech detected.” That message cannot establish that the user was silent or that their microphone failed.</li>
+<li>No confirmed device-specific root cause is available. The user’s browser/device and whether existing answer playback contains their voice remain unknown. Do not claim the threshold caused this particular failure.</li>
+</ul>
+<h2>Interaction and scope</h2>
+<ol>
+<li>Press Test mic &amp; video from idle practice. Request the same default camera and microphone used by practice. Show concise permission/setup feedback, a muted inline camera preview, and Cancel. Keep the current question, timing choices, owner, and saved answers untouched.</li>
+<li>Once ready, start the five-second sample immediately. Show “Speak for five seconds,” remaining time, and a labeled microphone meter. Derive the meter from the PCM stream used for recognition. Label it as audio level; movement is evidence of input, not proof of intelligible speech.</li>
+<li>Stop and release camera/microphone at completion. Show a video player with controls and audible playback available by user gesture, a Try again action, and Close. State “Test only — not saved or shared.” Do not autoplay audible output.</li>
+<li>Report missing PCM separately from captured silent/near-zero PCM and captured audio. For missing PCM explain that transcription audio was not captured, even if playback has sound; for near-zero input suggest checking microphone permissions, system/browser input selection, and hardware mute. For captured audio ask the user to listen for their voice, and explain that input detection alone does not guarantee recognition.</li>
+<li>Starting practice, changing questions, opening Answers, closing/retesting, hiding or leaving the page, or losing a track must end the test, release resources, and suppress stale callbacks. Test cancellation discards its sample. Practice cannot overlap test setup or recording. Existing unsaved-answer rescue remains protected.</li>
+</ol>
+<p>Keep the interface consistent with the existing monochrome layout. Use a compact, accessible inline panel; do not add a modal framework, device-selection system, new service, or persistent diagnostic history. Screen readers should receive phase/result updates, not a stream of meter announcements. Respect narrow screens and reduced motion.</p>
+<h2>Implementation boundaries</h2>
+<ul>
+<li><strong>Capture core:</strong> extend <code>src/capture.ts</code> through a shared internal implementation or a clearly bounded test mode. Expose a dedicated test entry point with immediate recording and a fixed five-second duration while preserving public practice timing validation (preparation 1–120 seconds, answer 5–30 seconds). Avoid a second divergent recorder pipeline. Add an optional throttled PCM-level callback. A separate pure audio-analysis helper is appropriate for shared diagnostics.</li>
+<li><strong>Cancellation:</strong> preserve late permission-grant cleanup, AbortSignal handling, generation checks, track-ended handling, pagehide/visibility cleanup, recorder finalization fallback, worklet flushing, and AudioContext closure. Revocation of test object URLs, video pause/source clearing, and timer/meter cleanup must occur on every exit. A pending finalize must not repopulate a closed/replaced panel. Practice’s Stop &amp; save behavior must remain unchanged.</li>
+<li><strong>Recognition:</strong> remove the aggressive whole-clip RMS speech decision. Send nonzero quiet audio to Whisper. If retaining a silence optimization, limit it to demonstrably empty/zero or a deliberately tiny numerical-noise floor, with regression coverage showing quiet speech is not filtered. Distinguish no PCM, silent input, empty recognized text, and recognition error in actionable messages. Do not label an empty model result as proof of no speech.</li>
+<li><strong>Compatibility:</strong> retain existing answer status/storage/sync schemas where practical; use existing diagnostic text plumbing (<code>transcriptError</code>) or a backward-compatible local mechanism. Old <code>silent</code> answers need neutral fallback copy such as “No transcript was recognized. Play the recording to check the audio, then retry or add text.” Retry and manual transcript editing remain available. Preserve Supabase behavior and existing records.</li>
+<li><strong>UI:</strong> add isolated test state to <code>src/main.ts</code> and styles to <code>src/style.css</code>. The test completion path must never call <code>persist</code>, <code>saveAnswer</code>, transcription enqueue, or sync/upload. Prevent answer-worker progress from overwriting active diagnostic UI.</li>
+</ul>
+<h2>Acceptance and focused verification</h2>
+<ul>
+<li>Node tests prove missing PCM, exact silence, low-amplitude nonzero audio, and short audio surrounded by silence receive distinct and appropriate handling. Quiet audio reaches recognition rather than being rejected by the former 0.003 threshold; empty model output receives neutral recognition wording.</li>
+<li>Capture tests exercise immediate five-second test behavior, live level reporting, one-time completion, cancellation while permission/preview/worklet/resume are pending, late grants, close/retest races, visibility/pagehide, and track loss. Verify tracks end, preview clears, contexts close, timers stop, and test callbacks cannot create saved answers.</li>
+<li>Run the existing timing/capture setup tests to ensure practice still excludes preparation from video and PCM, auto-stops at its configured answer deadline, and preserves Stop &amp; save.</li>
+<li>Use an isolated browser profile with synthetic camera and known speech audio to verify visible preview, nonzero meter, playable test clip, sample duration, and PCM diagnostics. Compare IndexedDB answer count before/after and verify no test upload/transcription job. Test zero-input and permission rejection, navigation/close/retest cleanup, then normal practice after a test.</li>
+<li>Review keyboard/focus behavior and a narrow mobile viewport. Run one normal project test suite and build under the pinned Node 22.23.0 runtime. Only the implementation manager owns broad validation; delegated checks stay focused. No no-mistakes pipeline.</li>
+<li>Use localhost only during active verification and stop only the verified task-owned process before handoff. Do not read private invite files, mutate real user/team data, or test deletion/sharing against production.</li>
+</ul>
+<h2>Handoff and review</h2>
+<p>A fresh Sol-medium implementation manager owns the change and validation, followed by a fresh Astra reviewer. The handoff and review must be self-contained HTML with absolute paths. Report the actual checks performed, distinguish synthetic-browser evidence from real hardware verification, and explicitly leave the user-specific cause unconfirmed unless new evidence establishes it.</p>
+</html>

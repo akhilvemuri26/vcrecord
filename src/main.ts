@@ -2,7 +2,8 @@ import "@fontsource/lato/latin-400.css";
 import "@fontsource/lato/latin-700.css";
 import "./style.css";
 import { questions, tips } from "./questions";
-import { startCapture } from "./capture";
+import { startCapture, startMediaTest } from "./capture";
+import { analyzeAudio, EMPTY_TRANSCRIPT_MESSAGE } from "./audio-analysis";
 import { readTiming, validTiming } from "./timing";
 import { listAnswers, listSyncRecords, getAnswer, saveAnswer, updateAnswer, type Answer, type RemotePendingAnswer } from "./storage";
 import * as sharing from "./sharing";
@@ -22,7 +23,7 @@ try { team = JSON.parse(localStorage.getItem("vcrecord-team") ?? "null") ?? unde
 let remoteAnswers: sharing.RemoteAnswer[] = [];
 let remoteRefresh = 0, libraryRender = 0;
 const app = document.querySelector<HTMLDivElement>("#app")!;
-app.innerHTML = `<header><strong>VC Record</strong><nav aria-label="Main"><button id="practice-nav">Practice</button><button id="answers-nav">Answers</button></nav></header><main><div class="team-controls"><button id="create-team">Create shared team</button><button id="copy-invite" hidden>Copy invite</button><button id="refresh-team" hidden>Refresh / retry sync</button><button id="share-saved" hidden>Share saved answers</button><span id="team-status" role="status"></span></div><section id="practice"><h1 id="question" hidden></h1><p id="phase" class="position">Ready to practice</p><div class="timer" id="timer" aria-label="Seconds remaining" hidden>15</div><video id="preview" autoplay muted playsinline hidden aria-label="Camera preview"></video><p class="person-field"><label for="person">Answering as </label><input id="person" maxlength="80" autocomplete="name" placeholder="Your name"></p><div class="actions"><button id="record" class="primary">Start practice</button><button id="cancel" hidden>Cancel</button><button id="stop" hidden>Stop &amp; save</button><button id="next">Next question</button></div><p id="status" class="status" role="status" aria-live="polite"></p><div class="actions" id="rescue" hidden><button id="rescue-download">Download unsaved recording</button><button id="rescue-retry">Retry saving</button></div><details id="timing-settings"><summary>Timing settings</summary><form id="timing-form" novalidate><label for="prep-seconds">Preparation seconds</label><input id="prep-seconds" type="number" min="1" max="120" step="1" required><label for="answer-seconds">Answer seconds</label><input id="answer-seconds" type="number" min="5" max="30" step="1" required><button>Save timing</button><p id="timing-error" role="status"></p></form></details><p id="timing-summary" class="position"></p><p id="tip" class="tip" hidden></p></section><section class="library" id="library" hidden><h1>Answers</h1><p><span id="library-context">Answers saved in this browser.</span></p><p><label for="group-by">Group answers by </label><select id="group-by"><option value="question">Question</option><option value="person">Person</option><option value="recent">Most recent</option></select></p><p id="library-status" role="status"></p><div class="library-layout"><ul class="answer-list" id="answer-list"></ul><div class="detail" id="detail"></div></div></section></main>`;
+app.innerHTML = `<header><strong>VC Record</strong><nav aria-label="Main"><button id="practice-nav">Practice</button><button id="answers-nav">Answers</button></nav></header><main><div class="team-controls"><button id="create-team">Create shared team</button><button id="copy-invite" hidden>Copy invite</button><button id="refresh-team" hidden>Refresh / retry sync</button><button id="share-saved" hidden>Share saved answers</button><span id="team-status" role="status"></span></div><section id="practice"><h1 id="question" hidden></h1><p id="phase" class="position">Ready to practice</p><div class="timer" id="timer" aria-label="Seconds remaining" hidden>15</div><video id="preview" autoplay muted playsinline hidden aria-label="Camera preview"></video><p class="person-field"><label for="person">Answering as </label><input id="person" maxlength="80" autocomplete="name" placeholder="Your name"></p><div class="actions"><button id="record" class="primary">Start practice</button><button id="test-media">Test mic &amp; video</button><button id="cancel" hidden>Cancel</button><button id="stop" hidden>Stop &amp; save</button><button id="next">Next question</button></div><section id="media-test" class="media-test" aria-labelledby="media-test-title" hidden><h2 id="media-test-title" tabindex="-1">Test mic &amp; video</h2><p id="media-test-status" role="status" aria-live="polite"></p><video id="media-test-preview" muted playsinline aria-label="Test camera preview" hidden></video><div id="media-test-level" hidden><label for="media-test-meter">Microphone audio level</label><meter id="media-test-meter" min="0" max="1" value="0"></meter><span id="media-test-countdown" aria-hidden="true"></span></div><video id="media-test-player" controls playsinline aria-label="Test recording playback" hidden></video><p class="position">Test only — not saved or shared.</p><div class="actions"><button id="media-test-again" hidden>Try again</button><button id="media-test-close">Cancel</button></div></section><p id="status" class="status" role="status" aria-live="polite"></p><div class="actions" id="rescue" hidden><button id="rescue-download">Download unsaved recording</button><button id="rescue-retry">Retry saving</button></div><details id="timing-settings"><summary>Timing settings</summary><form id="timing-form" novalidate><label for="prep-seconds">Preparation seconds</label><input id="prep-seconds" type="number" min="1" max="120" step="1" required><label for="answer-seconds">Answer seconds</label><input id="answer-seconds" type="number" min="5" max="30" step="1" required><button>Save timing</button><p id="timing-error" role="status"></p></form></details><p id="timing-summary" class="position"></p><p id="tip" class="tip" hidden></p></section><section class="library" id="library" hidden><h1>Answers</h1><p><span id="library-context">Answers saved in this browser.</span></p><p><label for="group-by">Group answers by </label><select id="group-by"><option value="question">Question</option><option value="person">Person</option><option value="recent">Most recent</option></select></p><p id="library-status" role="status"></p><div class="library-layout"><ul class="answer-list" id="answer-list"></ul><div class="detail" id="detail"></div></div></section></main>`;
 const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 let owner: {
     id: string;
@@ -65,6 +66,81 @@ let currentQuestion = questions[Math.floor(Math.random() * questions.length)], b
 let selectedId: string | undefined, playbackURL: string | undefined, worker: Worker | undefined, activeJob: string | undefined;
 const jobs: string[] = [];
 let progress = "";
+let testGeneration = 0, testAbort: AbortController | undefined, testURL: string | undefined;
+function closeMediaTest(returnFocus = false) {
+    testGeneration++;
+    const abort = testAbort; testAbort = undefined; abort?.abort();
+    const player = el<HTMLVideoElement>("media-test-player");
+    player.pause(); player.removeAttribute("src"); player.load();
+    if (testURL) URL.revokeObjectURL(testURL);
+    testURL = undefined;
+    el("media-test").hidden = true;
+    el<HTMLMeterElement>("media-test-meter").value = 0;
+    if (returnFocus) el("test-media").focus();
+}
+async function beginMediaTest() {
+    if (phase !== "idle" || unsaved || document.visibilityState === "hidden") return;
+    closeMediaTest();
+    const token = testGeneration;
+    const abort = new AbortController(); testAbort = abort;
+    const current = () => token === testGeneration && !abort.signal.aborted;
+    el("media-test").hidden = false;
+    el("media-test-preview").hidden = false;
+    el("media-test-player").hidden = true;
+    el("media-test-level").hidden = true;
+    el("media-test-again").hidden = true;
+    el("media-test-close").textContent = "Cancel";
+    el("media-test-status").textContent = "Getting camera and microphone ready…";
+    el("media-test-title").focus();
+    try {
+        const handle = await startMediaTest(el("media-test-preview"), remaining => {
+            if (current()) el("media-test-countdown").textContent = `${remaining}s remaining`;
+        }, result => {
+            if (!current()) return;
+            testAbort = undefined;
+            el("media-test-preview").hidden = true;
+            el("media-test-level").hidden = true;
+            testURL = URL.createObjectURL(result.video);
+            const player = el<HTMLVideoElement>("media-test-player");
+            player.src = testURL; player.muted = false; player.hidden = false;
+            const analysis = analyzeAudio(result.audio);
+            el("media-test-status").textContent = analysis.message + (analysis.kind === "captured" && analysis.rms < 0.00001
+                ? " Input level is very low; check microphone selection and hardware mute if you cannot hear your voice." : "");
+            el("media-test-again").hidden = false;
+            el("media-test-close").textContent = "Close";
+        }, error => {
+            if (!current()) return;
+            testAbort = undefined;
+            el("media-test-preview").hidden = true;
+            el("media-test-level").hidden = true;
+            el("media-test-status").textContent = "Could not test camera and microphone: " + error.message;
+            el("media-test-again").hidden = false;
+            el("media-test-close").textContent = "Close";
+        }, {
+            signal: abort.signal,
+            onPhase: () => {
+                if (!current()) return;
+                el("media-test-status").textContent = "Speak for five seconds.";
+                el("media-test-level").hidden = false;
+            },
+            onAudioLevel: level => { if (current()) el<HTMLMeterElement>("media-test-meter").value = Math.min(1, level * 8); },
+            onCancelled: () => { if (current()) closeMediaTest(true); },
+        });
+        if (!current()) handle.stop();
+    } catch (error) {
+        if (!current()) return;
+        testAbort = undefined;
+        el("media-test-preview").hidden = true;
+        el("media-test-status").textContent = "Could not test camera and microphone: " + (error instanceof Error ? error.message : String(error));
+        el("media-test-again").hidden = false;
+        el("media-test-close").textContent = "Close";
+    }
+}
+el("test-media").onclick = () => void beginMediaTest();
+el("media-test-again").onclick = () => void beginMediaTest();
+el("media-test-close").onclick = () => closeMediaTest(true);
+document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") closeMediaTest(); });
+window.addEventListener("pagehide", () => closeMediaTest());
 let jobTimer: ReturnType<typeof setTimeout> | undefined;
 function question(reveal = false) {
     el("question").textContent = currentQuestion.text;
@@ -83,6 +159,7 @@ function controls() {
     const locked = phase === "recording" || phase === "saving";
     busy = phase !== "idle";
     el<HTMLButtonElement>("record").disabled = busy || !!unsaved;
+    el<HTMLButtonElement>("test-media").disabled = busy || !!unsaved;
     el<HTMLInputElement>("person").disabled = busy || !!unsaved;
     el<HTMLButtonElement>("next").disabled = locked || !!unsaved;
     el<HTMLButtonElement>("answers-nav").disabled = locked;
@@ -173,6 +250,7 @@ el("rescue-retry").onclick = async () => {
 async function beginAttempt() {
     if (phase !== "idle" || document.visibilityState === "hidden" || el("practice").hidden) return;
     if (unsaved) { status("Save the unsaved answer, or download and discard it before practicing again."); return; }
+    closeMediaTest();
     saveOwner();
     if (!owner.name) { status("Enter your name, then start practice."); el("person").focus(); return; }
     el<HTMLDetailsElement>("timing-settings").open = false;
@@ -228,6 +306,7 @@ el("record").onclick = () => void beginAttempt();
 el("stop").onclick = () => { capture?.stop(); el<HTMLButtonElement>("stop").disabled = true; };
 el("next").onclick = () => {
     if (phase === "recording" || phase === "saving" || unsaved) return;
+    closeMediaTest();
     cancelAttempt();
     const choices = questions.filter(q => q.id !== currentQuestion.id);
     currentQuestion = choices[Math.floor(Math.random() * choices.length)];
@@ -235,6 +314,7 @@ el("next").onclick = () => {
 };
 function practice() {
     if (phase === "recording" || phase === "saving") return;
+    closeMediaTest();
     el("practice").hidden = false;
     el("library").hidden = true;
     if (playbackURL) {
@@ -247,6 +327,7 @@ function practice() {
 el("practice-nav").onclick = practice;
 el("answers-nav").onclick = () => {
     if (phase === "recording" || phase === "saving") return;
+    closeMediaTest();
     cancelAttempt();
     el("practice").hidden = true;
     el("library").hidden = false;
@@ -260,7 +341,7 @@ function queueWorker() {
         const msg = event.data;
         if (msg.status === "progress") {
             progress = msg.message;
-            if (!busy)
+            if (!busy && el("media-test").hidden)
                 status(progress);
             if (selectedId === msg.id)
                 el("library-status").textContent = progress;
@@ -274,13 +355,13 @@ function queueWorker() {
                     answer.transcript = msg.text ?? "";
             });
             void syncAndRefresh();
-            if (!busy)
-                status(msg.status === "done" ? "Transcript ready in Answers." : msg.status === "silent" ? "Answer saved. No speech detected." : "Answer saved. Transcription failed; retry in Answers.");
+            if (!busy && el("media-test").hidden)
+                status(msg.status === "done" ? "Transcript ready in Answers." : msg.status === "silent" ? ("Answer saved. " + (msg.error ?? EMPTY_TRANSCRIPT_MESSAGE)) : "Answer saved. Transcription failed; retry in Answers.");
             if (!el("library").hidden)
                 await renderLibrary();
         }
         catch (error) {
-            if (!busy) status("Recording remains saved, but transcript could not be saved: " + String(error));
+            if (!busy && el("media-test").hidden) status("Recording remains saved, but transcript could not be saved: " + String(error));
         }
         finally {
             void syncAndRefresh();
@@ -305,7 +386,7 @@ function queueWorker() {
             });
         }
         void syncAndRefresh();
-        if (!busy) status("Recording saved. Speech worker could not start; retry in Answers.");
+        if (!busy && el("media-test").hidden) status("Recording saved. Speech worker could not start; retry in Answers.");
         if (!el("library").hidden)
             await renderLibrary();
         void runQueue();
@@ -349,7 +430,7 @@ async function runQueue() {
             }).catch(() => {
             });
             void syncAndRefresh();
-            if (!busy)
+            if (!busy && el("media-test").hidden)
                 status("Recording saved. Transcription timed out; retry in Answers.");
             if (!el("library").hidden)
                 await renderLibrary();
@@ -358,7 +439,7 @@ async function runQueue() {
     }
     catch (error) {
         activeJob = undefined;
-        if (!busy) status("Could not start transcription: " + String(error));
+        if (!busy && el("media-test").hidden) status("Could not start transcription: " + String(error));
         void runQueue();
     }
 }
@@ -417,7 +498,7 @@ async function renderDetail(answer?: LibraryAnswer) {
         const text = existing.querySelector<HTMLTextAreaElement>("textarea")!;
         if (!text.dataset.dirty)
             text.value = answer.transcript;
-        existing.querySelector<HTMLElement>("[data-transcript-state]")!.textContent = answer.transcriptError ?? (answer.status === "working" ? "Transcribing on your device\u2026" : answer.status === "silent" ? "No speech detected." : "");
+        existing.querySelector<HTMLElement>("[data-transcript-state]")!.textContent = answer.transcriptError ?? (answer.status === "working" ? "Transcribing on your device\u2026" : answer.status === "silent" ? EMPTY_TRANSCRIPT_MESSAGE : "");
         const retry = existing.querySelector<HTMLButtonElement>("[data-retry]")!;
         retry.dataset.retry = "true";
         retry.hidden = !isLocal(answer) || !mayEdit(answer);
@@ -460,10 +541,10 @@ async function renderDetail(answer?: LibraryAnswer) {
         draftRevision++;
         textarea.dataset.dirty = "true";
     };
-    textarea.placeholder = answer.status === "silent" ? "No speech detected. Add your own transcript." : answer.status === "error" ? "Transcription failed. Retry below or type your answer." : "Transcription may take a moment on first use.";
+    textarea.placeholder = answer.status === "silent" ? EMPTY_TRANSCRIPT_MESSAGE : answer.status === "error" ? "Transcription failed. Retry below or type your answer." : "Transcription may take a moment on first use.";
     const state = document.createElement("p");
     state.dataset.transcriptState = "true";
-    state.textContent = answer.transcriptError ?? (answer.status === "working" ? (progress || "Transcribing on your device\u2026") : answer.status === "pending" ? "Waiting for transcription\u2026" : answer.status === "silent" ? "No speech detected." : "");
+    state.textContent = answer.transcriptError ?? (answer.status === "working" ? (progress || "Transcribing on your device\u2026") : answer.status === "pending" ? "Waiting for transcription\u2026" : answer.status === "silent" ? EMPTY_TRANSCRIPT_MESSAGE : "");
     const actions = document.createElement("div");
     actions.className = "actions";
     const button = (name: string, fn: () => void) => {

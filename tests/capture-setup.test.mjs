@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startCapture } from '../src/capture.ts';
+import { startCapture, startMediaTest } from '../src/capture.ts';
 
 function deferred() {
   let resolve;
@@ -8,9 +8,10 @@ function deferred() {
   return { promise, resolve };
 }
 
+for (const start of [startCapture, startMediaTest]) {
 for (const stage of ['permission', 'preview', 'worklet', 'resume']) {
   for (const event of ['visibilitychange', 'pagehide', 'abort']) {
-    test(`capture cancels ${stage} setup on ${event}, including a later visible page`, async t => {
+    test(`${start.name} cancels ${stage} setup on ${event}, including a later visible page`, async t => {
       const gate = deferred();
       const reached = deferred();
       const pause = async phase => {
@@ -46,7 +47,7 @@ for (const stage of ['permission', 'preview', 'worklet', 'resume']) {
       const controller = new AbortController();
       let cancellations = 0;
       const preview = { srcObject: null, play: async () => pause('preview') };
-      const result = startCapture(preview, () => assert.fail('cancelled capture ticked'), () => assert.fail('cancelled capture saved'), () => assert.fail('cancelled capture recorded'), { signal: controller.signal, onCancelled: () => cancellations++ });
+      const result = start(preview, () => assert.fail('cancelled capture ticked'), () => assert.fail('cancelled capture saved'), () => assert.fail('cancelled capture recorded'), { signal: controller.signal, onCancelled: () => cancellations++ });
       const rejected = assert.rejects(result, /cancelled/);
       await reached.promise;
       if (event === 'visibilitychange') {
@@ -66,4 +67,6 @@ for (const stage of ['permission', 'preview', 'worklet', 'resume']) {
       assert.equal(preview.srcObject, null);
     });
   }
+}
+
 }

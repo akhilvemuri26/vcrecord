@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { startCapture } from '../src/capture.ts';
+import { startCapture, startMediaTest } from '../src/capture.ts';
 
-function fixture(t, running = true) {
+function fixture(t, running = true, autoFlush = true) {
   let now = 0;
   let nextTimer = 0;
   const timers = new Map();
@@ -17,6 +17,8 @@ function fixture(t, running = true) {
   const messages = [];
   let starts = 0;
   let context;
+  let worklet;
+  let recorder;
   class Context {
     state = running ? 'running' : 'suspended';
     destination = {};
@@ -28,13 +30,15 @@ function fixture(t, running = true) {
     async close() { this.state = 'closed'; }
   }
   class Worklet {
+    constructor() { worklet = this; }
     port = { onmessage: null, postMessage: message => {
       messages.push(message);
-      if (message === 'flush') this.port.onmessage?.({ data: 'flushed' });
+      if (message === 'flush' && autoFlush) this.port.onmessage?.({ data: 'flushed' });
     } };
     connect() {} disconnect() {}
   }
   class Recorder extends EventTarget {
+    constructor() { super(); recorder = this; }
     static isTypeSupported() { return true; }
     mimeType = 'video/webm';
     state = 'inactive';
@@ -58,7 +62,7 @@ function fixture(t, running = true) {
     t.after(() => { if (old) Object.defineProperty(globalThis, key, old); else delete globalThis[key]; });
   }
   const preview = { srcObject: null, play: async () => {} };
-  return { preview, track, messages, doc, win, get starts() { return starts; }, get context() { return context; },
+  return { preview, track, messages, doc, win, get worklet() { return worklet; }, get recorder() { return recorder; }, get starts() { return starts; }, get context() { return context; },
     advance(ms) { now += ms; for (const callback of [...timers.values()]) callback(); },
     get timers() { return timers.size; } };
 }
@@ -151,5 +155,86 @@ for (const callback of ['phase', 'tick']) {
     assert.equal(f.timers, 0);
     assert.equal(f.starts, 0);
     assert.equal(f.track.readyState, 'ended');
+  });
+}
+
+
+test('media test immediately records five seconds and meters recognition PCM at most every 100ms', async t => {
+  const f = fixture(t);
+  const phases = [], ticks = [], levels = [], results = [];
+  await startMediaTest(f.preview, n => ticks.push(n), r => results.push(r), assert.fail,
+    { onPhase: p => phases.push(p), onAudioLevel: level => levels.push(level) });
+  assert.deepEqual(phases, ['recording']);
+  assert.deepEqual(ticks, [5]);
+  assert.equal(f.starts, 1);
+  f.worklet.port.onmessage({ data: new Float32Array([0.5, -0.5]) });
+  f.worklet.port.onmessage({ data: new Float32Array([0.25]) });
+  assert.deepEqual(levels, [0.5]);
+  f.advance(100);
+  f.worklet.port.onmessage({ data: new Float32Array([0.25]) });
+  assert.deepEqual(levels, [0.5, 0.25]);
+  f.advance(4900);
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(results.length, 1);
+  assert.equal(results[0].duration, 5);
+  assert.deepEqual([...results[0].audio], [0.5, -0.5, 0.25, 0.25]);
+  assert.equal(f.track.readyState, 'ended');
+  assert.equal(f.preview.srcObject, null);
+  assert.equal(f.timers, 0);
+});
+
+for (const cause of ['stop', 'abort', 'hidden', 'pagehide', 'ended']) {
+  for (const finalizing of [false, true]) {
+    test(`media test discards on ${cause}, pending flush=${finalizing}`, async t => {
+      const f = fixture(t, true, !finalizing);
+      const controller = new AbortController();
+      let cancelled = 0;
+      const handle = await startMediaTest(f.preview, () => {}, assert.fail, assert.fail,
+        { signal: controller.signal, onCancelled: () => cancelled++ });
+      const lateMessage = f.worklet.port.onmessage;
+      if (finalizing) f.advance(5000);
+      if (cause === 'stop') handle.stop();
+      if (cause === 'abort') controller.abort();
+      if (cause === 'hidden') { f.doc.visibilityState = 'hidden'; f.doc.dispatchEvent(new Event('visibilitychange')); }
+      if (cause === 'pagehide') f.win.dispatchEvent(new Event('pagehide'));
+      if (cause === 'ended') f.track.dispatchEvent(new Event('ended'));
+      handle.stop();
+      lateMessage({ data: new Float32Array([1]) });
+      lateMessage({ data: 'flushed' });
+      await Promise.resolve(); await Promise.resolve();
+      f.advance(10000);
+      assert.equal(cancelled, 1);
+      assert.equal(f.track.readyState, 'ended');
+      assert.equal(f.recorder.state, 'inactive');
+      assert.equal(f.context.state, 'closed');
+      assert.equal(f.preview.srcObject, null);
+      assert.equal(f.timers, 0);
+    });
+  }
+}
+
+test('practice stop still saves an active answer', async t => {
+  const f = fixture(t);
+  const results = [];
+  const handle = await startCapture(f.preview, () => {}, r => results.push(r), assert.fail, { preparationSeconds: 1 });
+  f.advance(1000);
+  f.advance(2000);
+  handle.stop();
+  await Promise.resolve(); await Promise.resolve();
+  assert.equal(results.length, 1);
+  assert.equal(results[0].duration, 2);
+});
+
+for (const callback of ['phase', 'tick']) {
+  test(`media test abort inside initial ${callback} callback releases the recorder and leaves no timer`, async t => {
+    const f = fixture(t);
+    const controller = new AbortController();
+    await startMediaTest(f.preview, () => { if (callback === 'tick') controller.abort(); }, assert.fail, assert.fail,
+      { signal: controller.signal, onPhase: () => { if (callback === 'phase') controller.abort(); } });
+    await Promise.resolve();
+    assert.equal(f.recorder.state, 'inactive');
+    assert.equal(f.timers, 0);
+    assert.equal(f.track.readyState, 'ended');
+    assert.equal(f.context.state, 'closed');
   });
 }
