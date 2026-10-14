@@ -1,4 +1,15 @@
-export interface Answer {
+export interface SyncMetadata {
+  teamId?: string;
+  ownerId?: string;
+  objectPath?: string;
+  syncState?: 'local' | 'pending' | 'synced' | 'error';
+  syncError?: string;
+  revision?: number;
+  uploaded?: boolean;
+  deletedAt?: number;
+}
+
+export interface Answer extends SyncMetadata {
   id: string;
   questionId: string;
   person?: string;
@@ -13,6 +24,13 @@ export interface Answer {
   status: 'pending' | 'working' | 'done' | 'error' | 'silent';
   transcriptError?: string;
   edited?: boolean;
+}
+
+export type RemotePendingAnswer = Omit<Answer, 'video' | 'audio'> & { remoteOnly: true };
+export type SyncRecord = Answer | RemotePendingAnswer;
+
+export function isLocalAnswer(answer: SyncRecord): answer is Answer {
+  return !('remoteOnly' in answer && answer.remoteOnly);
 }
 
 const DATABASE = 'vcrecord-answers';
@@ -100,22 +118,31 @@ async function transact<T>(
   });
 }
 
-export function listAnswers(): Promise<Answer[]> {
+export function listSyncRecords(): Promise<SyncRecord[]> {
   return transact('readonly', (store, setResult) => {
     const request = store.getAll();
     request.onsuccess = () => {
-      const answers = request.result as Answer[];
+      const answers = request.result as SyncRecord[];
       answers.sort((a, b) => b.createdAt - a.createdAt || b.id.localeCompare(a.id));
       setResult(answers);
     };
   });
 }
 
-export function getAnswer(id: string): Promise<Answer | undefined> {
+export async function listAnswers(): Promise<Answer[]> {
+  return (await listSyncRecords()).filter((answer): answer is Answer => isLocalAnswer(answer) && !answer.deletedAt);
+}
+
+export function getSyncRecord(id: string): Promise<SyncRecord | undefined> {
   return transact('readonly', (store, setResult) => {
     const request = store.get(id);
-    request.onsuccess = () => setResult(request.result as Answer | undefined);
+    request.onsuccess = () => setResult(request.result as SyncRecord | undefined);
   });
+}
+
+export async function getAnswer(id: string): Promise<Answer | undefined> {
+  const answer = await getSyncRecord(id);
+  return answer && isLocalAnswer(answer) && !answer.deletedAt ? answer : undefined;
 }
 
 export async function saveAnswer(answer: Answer): Promise<void> {
@@ -137,23 +164,92 @@ export async function deleteAnswer(id: string): Promise<void> {
   });
 }
 
-/** Applies a synchronous change only if the answer still exists. */
-export function updateAnswer(id: string, change: (answer: Answer) => void): Promise<boolean> {
+/** Bookkeeping changes are atomic but never automatically mark content dirty. */
+export function mutateSync(id: string, change: (answer: SyncRecord) => void): Promise<boolean> {
   return transact('readwrite', (store, setResult, abortWith) => {
     const request = store.get(id);
     request.onsuccess = () => {
-      const answer = request.result as Answer | undefined;
-      if (!answer) {
-        setResult(false);
-        return;
-      }
+      const answer = request.result as SyncRecord | undefined;
+      if (!answer) { setResult(false); return; }
       try {
         change(answer);
         store.put(answer);
         setResult(true);
-      } catch (error) {
-        abortWith(error);
+      } catch (error) { abortWith(error); }
+    };
+  });
+}
+
+/** Late inference results and edits cannot resurrect deleted recordings. */
+export function updateAnswer(id: string, change: (answer: Answer) => void): Promise<boolean> {
+  return transact('readwrite', (store, setResult, abortWith) => {
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const answer = request.result as SyncRecord | undefined;
+      if (!answer || answer.deletedAt || !isLocalAnswer(answer)) { setResult(false); return; }
+      try {
+        change(answer);
+        answer.revision = (answer.revision ?? 0) + 1;
+        if (answer.teamId) { answer.syncState = 'pending'; delete answer.syncError; }
+        store.put(answer);
+        setResult(true);
+      } catch (error) { abortWith(error); }
+    };
+  });
+}
+
+/** Materialize remote edits/deletions without replacing a local recording. */
+export function mutateRemote(
+  remote: RemotePendingAnswer,
+  change: (answer: SyncRecord) => void,
+): Promise<boolean> {
+  return transact('readwrite', (store, setResult, abortWith) => {
+    const request = store.get(remote.id);
+    request.onsuccess = () => {
+      const answer = (request.result as SyncRecord | undefined) ?? remote;
+      if (answer.deletedAt) { setResult(false); return; }
+      try {
+        change(answer);
+        answer.revision = (answer.revision ?? 0) + 1;
+        answer.syncState = 'pending';
+        delete answer.syncError;
+        store.put(answer);
+        setResult(true);
+      } catch (error) { abortWith(error); }
+    };
+  });
+}
+
+/** Remove acknowledged remote overlays only if no newer edit arrived. */
+export function removeRemoteOverlay(id: string, revision: number): Promise<void> {
+  return transact('readwrite', (store, setResult) => {
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const answer = request.result as SyncRecord | undefined;
+      if (answer && !isLocalAnswer(answer) && !answer.deletedAt &&
+          (answer.revision ?? 0) === revision) store.delete(id);
+      setResult(undefined);
+    };
+  });
+}
+
+/** Choose local deletion or a shared tombstone in the same transaction as the read. */
+export function markForDeletion(id: string): Promise<void> {
+  return transact('readwrite', (store, setResult) => {
+    const request = store.get(id);
+    request.onsuccess = () => {
+      const answer = request.result as SyncRecord | undefined;
+      if (answer) {
+        if (!answer.teamId) store.delete(id);
+        else if (!answer.deletedAt) {
+          answer.deletedAt = Date.now();
+          answer.revision = (answer.revision ?? 0) + 1;
+          answer.syncState = 'pending';
+          delete answer.syncError;
+          store.put(answer);
+        }
       }
+      setResult(undefined);
     };
   });
 }

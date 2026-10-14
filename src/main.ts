@@ -1,11 +1,27 @@
 import "@fontsource/lato/latin-400.css";
 import "@fontsource/lato/latin-700.css";
 import "./style.css";
-import { questions, tips, shuffle } from "./questions";
+import { questions, tips } from "./questions";
 import { startCapture } from "./capture";
-import { listAnswers, getAnswer, saveAnswer, deleteAnswer, updateAnswer, type Answer } from "./storage";
+import { listAnswers, listSyncRecords, getAnswer, saveAnswer, updateAnswer, type Answer, type RemotePendingAnswer } from "./storage";
+import * as sharing from "./sharing";
+import { drainSync, assignTeam, markDeleted, queueRemoteEdit, queueRemoteDelete } from "./sync";
+type LibraryAnswer = Answer | sharing.RemoteAnswer | RemotePendingAnswer;
+function captureInvitation() {
+    const fragment = new URLSearchParams(location.hash.slice(1));
+    if (!fragment.has("team") || !fragment.has("invite")) return false;
+    try { localStorage.setItem("vcrecord-pending-invite", JSON.stringify({ id: fragment.get("team"), invite: fragment.get("invite") })); } catch {}
+    history.replaceState(null, "", location.pathname + location.search);
+    return true;
+}
+captureInvitation();
+const stored = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
+let team: { id: string; invite?: string } | undefined;
+try { team = JSON.parse(localStorage.getItem("vcrecord-team") ?? "null") ?? undefined; } catch {}
+let remoteAnswers: sharing.RemoteAnswer[] = [];
+let remoteRefresh = 0, libraryRender = 0;
 const app = document.querySelector<HTMLDivElement>("#app")!;
-app.innerHTML = `<header><strong>VC Record</strong><nav aria-label="Main"><button id="practice-nav">Practice</button><button id="answers-nav">Answers</button></nav></header><main><section id="practice"><p class="position" id="position"></p><h1 id="question"></h1><div class="timer" id="timer" aria-label="Seconds remaining">15</div><video id="preview" autoplay muted playsinline hidden aria-label="Camera preview"></video><p class="person-field"><label for="person">Answering as </label><input id="person" maxlength="80" autocomplete="name" placeholder="Your name"></p><div class="actions"><button id="record" class="primary">Record answer</button><button id="stop" hidden>Stop &amp; save</button><button id="next">Next question</button></div><p id="status" class="status" role="status" aria-live="polite"></p><div class="actions" id="rescue" hidden><button id="rescue-download">Download unsaved recording</button><button id="rescue-retry">Retry saving</button></div><p id="tip" class="tip"></p><p class="privacy">Camera + microphone · Up to 15 seconds<br>Saved in this browser. Clearing site data removes your answers.<br>Transcription runs on your device; the first use downloads a speech model.</p></section><section class="library" id="library" hidden><h1>Your answers</h1><p>Only answers saved in this browser appear here.</p><p><label for="group-by">Group answers by </label><select id="group-by"><option value="question">Question</option><option value="person">Person</option><option value="recent">Most recent</option></select></p><p id="library-status" role="status"></p><div class="library-layout"><ul class="answer-list" id="answer-list"></ul><div class="detail" id="detail"></div></div></section></main><footer>Interview questions and ProTips by <a href="https://jamescun.github.io/iPG/">James Cunningham &amp; Colin Hayhurst · iPG</a></footer>`;
+app.innerHTML = `<header><strong>VC Record</strong><nav aria-label="Main"><button id="practice-nav">Practice</button><button id="answers-nav">Answers</button></nav></header><main><div class="team-controls"><button id="create-team">Create shared team</button><button id="copy-invite" hidden>Copy invite</button><button id="refresh-team" hidden>Refresh / retry sync</button><button id="share-saved" hidden>Share saved answers</button><span id="team-status" role="status"></span></div><section id="practice"><h1 id="question"></h1><div class="timer" id="timer" aria-label="Seconds remaining">15</div><video id="preview" autoplay muted playsinline hidden aria-label="Camera preview"></video><p class="person-field"><label for="person">Answering as </label><input id="person" maxlength="80" autocomplete="name" placeholder="Your name"></p><div class="actions"><button id="record" class="primary">Record answer</button><button id="stop" hidden>Stop &amp; save</button><button id="next">Next question</button></div><p id="status" class="status" role="status" aria-live="polite"></p><div class="actions" id="rescue" hidden><button id="rescue-download">Download unsaved recording</button><button id="rescue-retry">Retry saving</button></div><p id="tip" class="tip"></p></section><section class="library" id="library" hidden><h1>Answers</h1><p><span id="library-context">Answers saved in this browser.</span></p><p><label for="group-by">Group answers by </label><select id="group-by"><option value="question">Question</option><option value="person">Person</option><option value="recent">Most recent</option></select></p><p id="library-status" role="status"></p><div class="library-layout"><ul class="answer-list" id="answer-list"></ul><div class="detail" id="detail"></div></div></section></main>`;
 const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 let owner: {
     id: string;
@@ -31,12 +47,15 @@ function saveOwner() {
     }
 }
 el("person").onchange = saveOwner;
-const personName = (answer: Answer): string => answer.personId === owner.id ? owner.name : (answer.person ?? "Unassigned");
+const personName = (answer: LibraryAnswer): string => answer.person ?? "Unassigned";
+const personGroup = (answer: LibraryAnswer) => personName(answer).trim().toLocaleLowerCase();
+const isLocal = (answer: LibraryAnswer): answer is Answer => "video" in answer;
+const mayEdit = (answer: LibraryAnswer) => !answer.ownerId || answer.ownerId === sharing.getUserId();
 el("group-by").onchange = () => void renderLibrary();
 const status = (message: string) => {
     el("status").textContent = message;
 };
-let round = shuffle(questions), index = 0, busy = false, capture: {
+let currentQuestion = questions[Math.floor(Math.random() * questions.length)], busy = false, capture: {
     stop: () => void;
 } | undefined, unsaved: Answer | undefined;
 let selectedId: string | undefined, playbackURL: string | undefined, worker: Worker | undefined, activeJob: string | undefined;
@@ -44,12 +63,10 @@ const jobs: string[] = [];
 let progress = "";
 let jobTimer: ReturnType<typeof setTimeout> | undefined;
 function question() {
-    el("question").textContent = round[index].text;
-    el("position").textContent = `Question ${index + 1} of ${questions.length}`;
+    el("question").textContent = currentQuestion.text;
     el("tip").textContent = "ProTip: " + tips[Math.floor(Math.random() * tips.length)];
     el("timer").textContent = "15";
     el("timer").className = "timer";
-    el("next").textContent = index === round.length - 1 ? "Start new round" : "Next question";
 }
 function controls() {
     el<HTMLButtonElement>("record").disabled = busy;
@@ -75,6 +92,7 @@ async function persist(answer: Answer) {
         status("Answer saved. Transcribing on your device\u2026");
         el("record").textContent = "Record again";
         enqueue(answer.id);
+        void syncAndRefresh();
     }
     catch (error) {
         unsaved = answer;
@@ -117,8 +135,9 @@ el("record").onclick = async () => {
     el("preview").hidden = false;
     controls();
     status("Requesting camera and microphone\u2026");
-    const frozen = { ...round[index] };
+    const frozen = { ...currentQuestion };
     const person = owner.name, personId = owner.id;
+    const assignedTeam = team?.id, assignedOwner = sharing.getUserId();
     try {
         capture = await startCapture(el("preview"), remaining => {
             el("timer").textContent = String(Math.ceil(remaining));
@@ -128,7 +147,7 @@ el("record").onclick = async () => {
             el("preview").hidden = true;
             controls();
             status("Saving answer\u2026");
-            const answer: Answer = { id: crypto.randomUUID(), questionId: frozen.id, person, personId, question: frozen.text, createdAt: Date.now(), ...result, transcript: "", status: "pending" };
+            const answer: Answer = { id: crypto.randomUUID(), questionId: frozen.id, person, personId, question: frozen.text, createdAt: Date.now(), ...result, transcript: "", status: "pending", ...(assignedTeam && assignedOwner ? {teamId: assignedTeam, ownerId: assignedOwner, revision: 1, syncState: "pending" as const} : {}) };
             await persist(answer);
             busy = false;
             controls();
@@ -158,11 +177,8 @@ el("stop").onclick = () => {
 el("next").onclick = () => {
     if (busy)
         return;
-    index++;
-    if (index === round.length) {
-        round = shuffle(questions);
-        index = 0;
-    }
+    const choices = questions.filter(q => q.id !== currentQuestion.id);
+    currentQuestion = choices[Math.floor(Math.random() * choices.length)];
     question();
     status("");
     el("record").textContent = "Record answer";
@@ -182,7 +198,7 @@ el("practice-nav").onclick = practice;
 el("answers-nav").onclick = () => {
     el("practice").hidden = true;
     el("library").hidden = false;
-    void renderLibrary();
+    void refreshRemote().then(() => renderLibrary());
 };
 function queueWorker() {
     if (worker)
@@ -205,6 +221,7 @@ function queueWorker() {
                 if (!answer.edited)
                     answer.transcript = msg.text ?? "";
             });
+            void syncAndRefresh();
             if (!busy)
                 status(msg.status === "done" ? "Transcript ready in Answers." : msg.status === "silent" ? "Answer saved. No speech detected." : "Answer saved. Transcription failed; retry in Answers.");
             if (!el("library").hidden)
@@ -214,6 +231,7 @@ function queueWorker() {
             status("Recording remains saved, but transcript could not be saved: " + String(error));
         }
         finally {
+            void syncAndRefresh();
             activeJob = undefined;
             clearTimeout(jobTimer);
             progress = "";
@@ -234,6 +252,7 @@ function queueWorker() {
                 answer.transcriptError = "Speech worker could not start. Retry transcription.";
             });
         }
+        void syncAndRefresh();
         status("Recording saved. Speech worker could not start; retry in Answers.");
         if (!el("library").hidden)
             await renderLibrary();
@@ -253,7 +272,7 @@ async function runQueue() {
     activeJob = id;
     try {
         const answer = await getAnswer(id);
-        if (!answer) {
+        if (!answer || answer.deletedAt) {
             activeJob = undefined;
             void runQueue();
             return;
@@ -266,6 +285,7 @@ async function runQueue() {
             void runQueue();
             return;
         }
+        void syncAndRefresh();
         queueWorker().postMessage({ id, audio: answer.audio });
         jobTimer = setTimeout(async () => {
             worker?.terminate();
@@ -276,6 +296,7 @@ async function runQueue() {
                 current.transcriptError = "Speech model download or transcription timed out. Check your connection and retry.";
             }).catch(() => {
             });
+            void syncAndRefresh();
             if (!busy)
                 status("Recording saved. Transcription timed out; retry in Answers.");
             if (!el("library").hidden)
@@ -290,11 +311,15 @@ async function runQueue() {
     }
 }
 async function renderLibrary() {
+    const render = ++libraryRender;
     try {
-        const answers = await listAnswers();
+        const records = await listSyncRecords();
+        if (render !== libraryRender) return;
+        const answers: LibraryAnswer[] = [...records.filter(a => !a.deletedAt && (!a.teamId || a.teamId === team?.id)), ...remoteAnswers.filter(a => a.teamId === team?.id && !records.some(l => l.id === a.id))];
+        answers.sort((a,b) => b.createdAt - a.createdAt);
         const groupBy = el<HTMLSelectElement>("group-by").value;
         if (groupBy !== "recent")
-            answers.sort((a, b) => (groupBy === "person" ? (a.personId ?? "unassigned").localeCompare(b.personId ?? "unassigned") : questions.findIndex(q => q.id === a.questionId) - questions.findIndex(q => q.id === b.questionId)) || b.createdAt - a.createdAt);
+            answers.sort((a, b) => (groupBy === "person" ? personGroup(a).localeCompare(personGroup(b)) : questions.findIndex(q => q.id === a.questionId) - questions.findIndex(q => q.id === b.questionId)) || b.createdAt - a.createdAt);
         el("answers-nav").textContent = `Answers (${answers.length})`;
         const list = el("answer-list");
         list.replaceChildren();
@@ -306,7 +331,7 @@ async function renderLibrary() {
             selectedId = answers[0].id;
         let previousGroup = "";
         for (const a of answers) {
-            const groupId = groupBy === "question" ? a.questionId : groupBy === "person" ? (a.personId ?? "unassigned") : "";
+            const groupId = groupBy === "question" ? a.questionId : groupBy === "person" ? personGroup(a) : "";
             const group = groupBy === "question" ? a.question : groupBy === "person" ? personName(a) : "";
             if (groupId && groupId !== previousGroup) {
                 const heading = document.createElement("li");
@@ -319,7 +344,7 @@ async function renderLibrary() {
             button.textContent = groupBy === "question" ? personName(a) : a.question;
             button.setAttribute("aria-current", String(a.id === selectedId));
             const meta = document.createElement("small");
-            meta.textContent = `${personName(a)} · ${new Date(a.createdAt).toLocaleString()} · ${a.duration.toFixed(1)}s · ${a.edited ? "Edited transcript" : a.status}`;
+            meta.textContent = `${personName(a)} · ${new Date(a.createdAt).toLocaleString()} · ${a.duration.toFixed(1)}s · ${a.edited ? "Edited transcript" : a.status} · ${isLocal(a) ? (a.syncState === "synced" ? "Shared" : a.syncState === "error" ? "Sync failed — retry" : a.teamId ? "Sync pending" : "Local") : "Shared"}`;
             button.append(meta);
             button.onclick = () => {
                 selectedId = a.id;
@@ -334,7 +359,7 @@ async function renderLibrary() {
         el("library-status").textContent = "Could not read browser storage: " + String(error);
     }
 }
-async function renderDetail(answer?: Answer) {
+async function renderDetail(answer?: LibraryAnswer) {
     const existing = el("detail");
     if (answer && existing.dataset.answerId === answer.id) {
         const text = existing.querySelector<HTMLTextAreaElement>("textarea")!;
@@ -343,6 +368,7 @@ async function renderDetail(answer?: Answer) {
         existing.querySelector<HTMLElement>("[data-transcript-state]")!.textContent = answer.transcriptError ?? (answer.status === "working" ? "Transcribing on your device\u2026" : answer.status === "silent" ? "No speech detected." : "");
         const retry = existing.querySelector<HTMLButtonElement>("[data-retry]")!;
         retry.dataset.retry = "true";
+        retry.hidden = !isLocal(answer) || !mayEdit(answer);
         retry.disabled = answer.id === activeJob || jobs.includes(answer.id);
         return;
     }
@@ -360,14 +386,23 @@ async function renderDetail(answer?: Answer) {
     video.playsInline = true;
     video.className = "player";
     video.setAttribute("aria-label", "Recorded answer");
-    playbackURL = URL.createObjectURL(answer.video);
-    video.src = playbackURL;
+    if (isLocal(answer)) {
+        playbackURL = URL.createObjectURL(answer.video);
+        video.src = playbackURL;
+    } else {
+        void sharing.downloadVideo(answer.objectPath!).then(blob => {
+            if (selectedId !== answer.id || detail.dataset.answerId !== answer.id) return;
+            if (playbackURL) URL.revokeObjectURL(playbackURL);
+            playbackURL = URL.createObjectURL(blob); video.src = playbackURL;
+        }).catch(error => { if (selectedId === answer.id) { detail.dataset.answerId = ""; el("library-status").textContent = "Could not load video. Refresh to retry. " + String(error); } });
+    }
     const label = document.createElement("label");
     label.htmlFor = "transcript";
-    label.textContent = "Transcript (editable)";
+    label.textContent = mayEdit(answer) ? "Transcript (editable)" : "Transcript";
     const textarea = document.createElement("textarea");
     textarea.id = "transcript";
     textarea.value = answer.transcript;
+    textarea.readOnly = !mayEdit(answer);
     let draftRevision = 0;
     textarea.oninput = () => {
         draftRevision++;
@@ -386,14 +421,15 @@ async function renderDetail(answer?: Answer) {
         actions.append(b);
         return b;
     };
-    button("Save transcript", async () => {
+    const saveButton = button("Save transcript", async () => {
         const savedText = textarea.value;
         const savedRevision = draftRevision;
         try {
-            const exists = await updateAnswer(answer.id, current => {
+            const exists = isLocal(answer) ? await updateAnswer(answer.id, current => {
                 current.transcript = savedText;
                 current.edited = true;
-            });
+            }) : (await queueRemoteEdit(answer as sharing.RemoteAnswer, { transcript: savedText, edited: true }), true);
+            void syncAndRefresh();
             if (exists && draftRevision === savedRevision && textarea.value === savedText)
                 delete textarea.dataset.dirty;
             el("library-status").textContent = exists ? (textarea.dataset.dirty ? "Transcript saved. Newer changes are unsaved." : "Transcript saved.") : "This answer was deleted before the transcript could be saved.";
@@ -403,6 +439,7 @@ async function renderDetail(answer?: Answer) {
             el("library-status").textContent = "Transcript could not be saved: " + String(error);
         }
     });
+    saveButton.hidden = !mayEdit(answer);
     const retry = button("Retry transcription", () => {
         void (async () => {
             const current = await getAnswer(answer.id);
@@ -424,8 +461,9 @@ async function renderDetail(answer?: Answer) {
         });
     });
     retry.dataset.retry = "true";
+    retry.hidden = !isLocal(answer) || !mayEdit(answer);
     retry.disabled = answer.id === activeJob || jobs.includes(answer.id);
-    button("Download video", () => download(answer));
+    button("Download video", () => { void (async () => { const video = isLocal(answer) ? answer.video : await sharing.downloadVideo(answer.objectPath!); download({ ...answer, video } as Answer); })().catch(error => el("library-status").textContent = String(error)); });
     button("Download transcript", () => {
         const url = URL.createObjectURL(new Blob([answer.question + "\n\n" + textarea.value], { type: "text/plain" }));
         const link = document.createElement("a");
@@ -434,10 +472,18 @@ async function renderDetail(answer?: Answer) {
         link.click();
         setTimeout(() => URL.revokeObjectURL(url), 1000);
     });
-    button("Delete answer", () => {
-        if (confirm("Delete this answer and its transcript from this browser?"))
-            void deleteAnswer(answer.id).then(() => renderLibrary()).catch(error => el("library-status").textContent = String(error));
+    const deleteButton = button("Delete answer", () => {
+        if (confirm("Delete this answer and its transcript?"))
+            void (async () => {
+                if (isLocal(answer)) await markDeleted(answer.id);
+                else await queueRemoteDelete(answer as sharing.RemoteAnswer);
+                if (activeJob === answer.id) { worker?.terminate(); worker = undefined; activeJob = undefined; clearTimeout(jobTimer); }
+                const queued = jobs.indexOf(answer.id); if (queued >= 0) jobs.splice(queued, 1);
+                remoteAnswers = remoteAnswers.filter(a => a.id !== answer.id);
+                await renderLibrary(); void syncAndRefresh(); void runQueue();
+            })().catch(error => el("library-status").textContent = String(error));
     });
+    deleteButton.hidden = !mayEdit(answer);
     detail.append(heading, video, label, textarea, state, actions);
 }
 window.addEventListener("beforeunload", event => {
@@ -463,3 +509,55 @@ void listAnswers().then(answers => {
         if (answer.status === "pending" || answer.status === "working")
             enqueue(answer.id);
 }).catch(error => status("Browser storage is unavailable. Recordings can still be downloaded: " + String(error)));
+
+function teamControls() {
+    el("create-team").hidden = !!team;
+    el("copy-invite").hidden = !team?.invite;
+    el("refresh-team").hidden = !team && !stored("vcrecord-pending-invite");
+    el("share-saved").hidden = !team;
+    el("library-context").textContent = team ? "Team answers and your saved local answers." : "Answers saved in this browser.";
+}
+async function refreshRemote() {
+    if (!team) return;
+    const refresh = ++remoteRefresh;
+    const teamId = team.id;
+    try { const answers = await sharing.fetchAnswers(teamId); if (refresh === remoteRefresh && team?.id === teamId) remoteAnswers = answers; }
+    catch (error) { el("team-status").textContent = "Team unavailable. Your local recordings are safe. Retry sync. " + String(error); }
+}
+async function syncAndRefresh() {
+    await drainSync(() => { if (!el("library").hidden) return renderLibrary(); }); await refreshRemote();
+    if (!el("library").hidden) await renderLibrary();
+}
+async function initializeTeam() {
+    try {
+        if (team || stored("vcrecord-pending-invite")) await sharing.ensureSession();
+        const pending = JSON.parse(stored("vcrecord-pending-invite") ?? "null");
+        if (pending) {
+            await sharing.joinTeam(pending.id, pending.invite);
+            team = pending; localStorage.setItem("vcrecord-team", JSON.stringify(team));
+            localStorage.removeItem("vcrecord-pending-invite");
+        }
+        teamControls(); await syncAndRefresh();
+        if (team) el("team-status").textContent = "Shared team connected.";
+    } catch (error) { el("team-status").textContent = "Could not connect to team. Refresh / retry sync. " + String(error); teamControls(); }
+}
+el("create-team").onclick = async () => {
+    const button = el<HTMLButtonElement>("create-team"); button.disabled = true;
+    try { await sharing.ensureSession(); team = await sharing.createTeam("Cofounders"); localStorage.setItem("vcrecord-team", JSON.stringify(team)); teamControls(); el("team-status").textContent = "Team ready. Copy the invite for your cofounders."; }
+    catch (error) { el("team-status").textContent = "Could not create team. Try again. " + String(error); }
+    finally { button.disabled = false; }
+};
+el("copy-invite").onclick = async () => {
+    try { await navigator.clipboard.writeText(location.origin + location.pathname + "#team=" + team!.id + "&invite=" + team!.invite); el("team-status").textContent = "Invite copied."; }
+    catch { el("team-status").textContent = "Clipboard unavailable. Allow clipboard access and retry."; }
+};
+el("refresh-team").onclick = () => void initializeTeam();
+el("share-saved").onclick = async () => {
+    try { const userId = await sharing.ensureSession(); for (const answer of await listAnswers()) if (!answer.teamId) await assignTeam(answer.id, team!.id, userId); await syncAndRefresh(); el("team-status").textContent = "Saved answers assigned to this team. Failed uploads can be retried."; }
+    catch (error) { el("team-status").textContent = String(error); }
+};
+window.addEventListener("online", () => void initializeTeam());
+window.addEventListener("focus", () => { if (!el("library").hidden) void syncAndRefresh(); });
+teamControls(); void initializeTeam();
+
+window.addEventListener("hashchange", () => { if (captureInvitation()) void initializeTeam(); });

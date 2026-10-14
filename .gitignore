@@ -3,3 +3,7 @@ dist/
 test-results/
 playwright-report/
 .DS_Store
+
+# Private team invitations and local credentials
+.private/
+.env.local

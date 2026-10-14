@@ -14,7 +14,8 @@
   },
   "dependencies": {
     "@fontsource/lato": "5.2.6",
-    "@huggingface/transformers": "3.8.1"
+    "@huggingface/transformers": "3.8.1",
+    "@supabase/supabase-js": "^2.117.3"
   },
   "devDependencies": {
     "@playwright/test": "1.56.0",
