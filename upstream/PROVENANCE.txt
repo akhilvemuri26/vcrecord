@@ -1,0 +1,6 @@
+Source: https://raw.githubusercontent.com/jamescun/iPG/gh-pages/data.js
+Retrieved: 2026-10-14, raw HTTPS curl using resolved IP 185.199.108.133
+File: data.js (4068 bytes)
+SHA256: 8a87a454f47425ce4d62ffd32e733354e26334b994f7ff5bb43f966640dad69d
+Authors: James Cunningham and Colin Hayhurst (upstream index/README).
+77 questions and 7 tips. HTML entities are original source strings; decode for text display. All question/tip strings match the earlier web-recovered source exactly. No upstream license verified; preserve attribution and discovered notices.
