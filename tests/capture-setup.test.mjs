@@ -9,7 +9,7 @@ function deferred() {
 }
 
 for (const stage of ['permission', 'preview', 'worklet', 'resume']) {
-  for (const event of ['visibilitychange', 'pagehide']) {
+  for (const event of ['visibilitychange', 'pagehide', 'abort']) {
     test(`capture cancels ${stage} setup on ${event}, including a later visible page`, async t => {
       const gate = deferred();
       const reached = deferred();
@@ -43,18 +43,24 @@ for (const stage of ['permission', 'preview', 'worklet', 'resume']) {
         Object.defineProperty(globalThis, key, { configurable: true, value });
         t.after(() => { if (old) Object.defineProperty(globalThis, key, old); else delete globalThis[key]; });
       }
+      const controller = new AbortController();
+      let cancellations = 0;
       const preview = { srcObject: null, play: async () => pause('preview') };
-      const result = startCapture(preview, () => assert.fail('cancelled capture ticked'), () => assert.fail('cancelled capture saved'), () => assert.fail('cancelled capture recorded'));
+      const result = startCapture(preview, () => assert.fail('cancelled capture ticked'), () => assert.fail('cancelled capture saved'), () => assert.fail('cancelled capture recorded'), { signal: controller.signal, onCancelled: () => cancellations++ });
+      const rejected = assert.rejects(result, /cancelled/);
       await reached.promise;
       if (event === 'visibilitychange') {
         document.visibilityState = 'hidden';
         document.dispatchEvent(new Event(event));
-      } else window.dispatchEvent(new Event(event));
+      } else if (event === 'abort') controller.abort();
+      else window.dispatchEvent(new Event(event));
       if (stage !== 'permission') assert.equal(track.readyState, 'ended', 'acquired track stops before pending setup resolves');
       if (context) assert.equal(context.state, 'closed');
       document.visibilityState = 'visible';
       gate.resolve();
-      await assert.rejects(result, /cancelled.*hidden/);
+      await rejected;
+      await Promise.resolve();
+      assert.equal(cancellations, 1);
       assert.equal(starts, 0, 'late setup never constructs/starts a recorder');
       assert.equal(track.readyState, 'ended');
       assert.equal(preview.srcObject, null);

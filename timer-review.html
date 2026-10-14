@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Automatic practice timer — independent review</title><style>body{font:16px/1.6 system-ui,sans-serif;max-width:860px;margin:48px auto;padding:0 24px;color:#222}h1{line-height:1.2}h2{font-size:21px;margin-top:30px}li{margin:8px 0}code{background:#f3f3f3;padding:2px 4px}.verdict{border-left:4px solid #287344;padding:12px 18px;background:#f1f7f2}</style>
+<h1>Automatic practice timer: independent review</h1>
+<p class="verdict"><strong>Approved.</strong> No actionable blocking findings identified in the current uncommitted implementation.</p>
+<p>This fresh review assessed <code>timer-plan.html</code>, <code>timer-handoff.html</code>, the implementation diff, new timing and capture tests, and browser regression scripts. The accepted entry behavior is one initial <strong>Start practice</strong> permission gesture; the question appears when media setup is ready and its preparation timer begins. <strong>Next question</strong> starts the next cycle automatically.</p>
+<h2>Reviewed behavior</h2>
+<ul>
+<li>Default preparation and answer durations are 15 and 20 seconds. Separate monotonic deadlines keep preparation out of recorded duration. MediaRecorder and PCM collection begin at the preparation boundary; answer expiry stops and saves.</li>
+<li>Settings validate whole-number bounds, restore safely from browser storage, and snapshot the selected values for each attempt. Opening or editing settings cancels setup/preparation; recording and saving block timing edits.</li>
+<li>Attempt generations and cancellation signals guard pending setup, late permission resolution, navigation, and stale callbacks. Preparation cancellation releases resources without saving. Recording retains early stop and hidden-page save behavior.</li>
+<li>Question, identity, and team attribution remain fixed for the attempt. New attempts are blocked while saving or holding an unsaved rescue recording. Local persistence, transcript draft handling, synchronization, and sharing code remain intact.</li>
+<li>The mobile screenshot from browser QA shows readable controls and timing copy without horizontal overflow. Timer ticks do not repeatedly announce through the live status region.</li>
+</ul>
+<h2>Validation evidence and limits</h2>
+<p>The implementation handoff reports 38 passing tests under pinned Node 22.23.0, a successful TypeScript/Vite production build, default 15/20 and custom 1/5 browser cycles, playable saved media, cancellation and permission recovery, transcript draft regression checks, and storage-rescue checks. The reviewer inspected those tests and their assertions; broad tests and browser suites were not repeated.</p>
+<p>Reviewer checks: <code>git diff --check</code> passed, and port 4173 has no listening preview server. No review server was started. No implementation changes, deployment, commits, private invitation reads, or no-mistakes pipeline were performed.</p>
+<p>Real-device browser permissions and transcription inference remain outside this review's fresh execution coverage, as disclosed in the implementation handoff. Approval applies to this local change and the accepted one-gesture entry flow.</p>
+</html>

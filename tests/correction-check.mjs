@@ -10,6 +10,7 @@ try {
   const context = await browser.newContext({ permissions: ['camera', 'microphone'] });
   await context.route(/huggingface\.co|cdn\.jsdelivr\.net/, route => route.abort());
   await context.addInitScript(() => {
+    localStorage.setItem('vcrecord-timing', JSON.stringify({ preparationSeconds: 1, answerSeconds: 5 }));
     const transaction = IDBDatabase.prototype.transaction;
     IDBDatabase.prototype.transaction = function (...args) {
       const tx = transaction.apply(this, args);
