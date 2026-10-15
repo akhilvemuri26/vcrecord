@@ -25,7 +25,7 @@ try {
  const records=()=>page.evaluate(()=>new Promise((resolve,reject)=>{const req=indexedDB.open('vcrecord-answers',1);req.onsuccess=()=>{const db=req.result;const tx=db.transaction('answers');const get=tx.objectStore('answers').getAll();get.onsuccess=()=>resolve(get.result.map(a=>({id:a.id,duration:a.duration,size:a.video.size,samples:a.audio.length,question:a.question})));tx.oncomplete=()=>db.close();};req.onerror=()=>reject(req.error);}));
  await page.goto(url);assert.equal(await page.locator('#question').isVisible(),false);
  await page.locator('#record').click();assert.match(await page.locator('#status').textContent(),/Enter your name/);
- await page.locator('#person').fill('Timer QA');await page.locator('#record').click();await phase('Prepare');
+ await page.locator('#person').selectOption('Akhil');await page.locator('#record').click();await phase('Prepare');
  const revealed=await page.locator('#question').textContent();const prepAt=await page.evaluate(()=>performance.now());
  await page.waitForTimeout(14000);assert.deepEqual(await page.evaluate(()=>window.events),[]);
  await phase('Answer');const starts=await page.evaluate(()=>window.events);assert.equal(starts.length,2);assert.ok(starts[0].time-prepAt>=14500);

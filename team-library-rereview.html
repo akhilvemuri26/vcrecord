@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Team library correction rereview</title><style>body{max-width:860px;margin:40px auto;padding:0 24px;font:16px/1.6 system-ui,sans-serif;color:#242830}h1{line-height:1.2}h2{margin-top:28px}code{overflow-wrap:anywhere}a{color:#245a88}.verdict{border-left:4px solid #267446;background:#eef8f0;padding:12px 18px}</style></head><body>
+<h1>Team library correction rereview</h1>
+<p>October 15, 2026. Fresh independent review of the connection-status correction, its focused tests, and the transaction-local SQL probe adjustment. This review follows the <a href="team-library-review.html">original review</a> and <a href="team-library-correction.html">correction handoff</a>.</p>
+<p class="verdict"><strong>Approved for frontend publication. No blocking findings remain in this review scope.</strong> The original P2 finding is resolved: opening Answers during initialization can supersede the initial fetch and still complete the connection status. The prior review's approval of the generic SQL migration remains unchanged.</p>
+<h2>Correction assessment</h2>
+<ul>
+<li><code>src/main.ts:702</code>: <code>refreshLibraryConnection()</code> now owns completion for both Answers navigation and synchronization. A successful replacement fetch publishes Connected after checking upload failures; initialization no longer needs to be the last fetch to finish.</li>
+<li>The helper captures the connection generation, browser identity, and remote refresh sequence. It checks them after the asynchronous sync-record lookup, preventing an older completion from replacing a newer failure or identity-change message. Existing guards also reject stale remote answer results before cache changes.</li>
+<li>Partial fetch failures retain a failure status; upload failures retain their warning. A superseded success cannot clear a newer refresh failure. Navigation calls the fetch/status helper directly and does not add a synchronization drain or upload retry.</li>
+<li>The SQL test's <code>SET LOCAL storage.allow_delete_query = 'true'</code> is confined to the rolled-back probe transaction. It enables synthetic storage metadata cleanup under the installed deletion guard while leaving the authenticated RLS probes in place. It does not change the production migration.</li>
+</ul>
+<h2>Independent validation</h2>
+<p>All five tests in <code>tests/team-library-connection.test.mjs</code> passed independently with pinned Node <code>22.23.0</code> and test concurrency one. These tests transpile and execute the actual connection functions and Answers navigation handler from the application. They cover successful navigation supersession, partial-fetch failure, upload failure, identity change, and an older completion awaiting sync lookup while a newer fetch fails.</p>
+<p>The correction handoff reports a passing TypeScript/Vite production build and whitespace check. This reviewer did not duplicate broad validation, start a preview server, change application or backend code, invoke no-mistakes, or run production queries.</p>
+<h2>Release evidence and limits</h2>
+<p>The root-owned <a href="team-library-live-validation.html">live validation report</a> records a successful transactional dry-run and applied-mapping access probes, preservation of all 223 recording identities and matching objects, and a disposable fresh invite holder retrieving all 223 answers and actual private video bytes for both Akhil and Prakrit. These are root-reported live results, not operations repeated by this reviewer.</p>
+<p>Frontend publication and verification of the deployed interface remain root-owned. No new source correction is requested.</p>
+<p>Review file: <code>/Users/akhilvemuri/coding/vcrecord/team-library-rereview.html</code>.</p>
+</body></html>

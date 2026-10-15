@@ -6,6 +6,11 @@ const supabase: SupabaseClient = createClient(SUPABASE_URL, SUPABASE_PUBLISHABLE
 
 export type AnswerStatus = 'pending' | 'working' | 'done' | 'error' | 'silent';
 
+export interface AccessibleTeam {
+  id: string;
+  canonicalTeamId: string;
+}
+
 export interface RemoteAnswer {
   id: string;
   teamId: string;
@@ -30,14 +35,25 @@ export type AnswerPatch = Partial<Pick<RemoteAnswer, 'transcript' | 'status' | '
 
 let activeUserId: string | null = null;
 let sessionPromise: Promise<string> | undefined;
+let sessionRevision = 0;
+const sessionListeners = new Set<(userId: string | null) => void>();
 
 supabase.auth.onAuthStateChange((event, session) => {
   const previousUserId = activeUserId;
   activeUserId = session?.user.id ?? null;
-  if (event === 'SIGNED_OUT' || (previousUserId && activeUserId && previousUserId !== activeUserId)) {
+  if (event === 'SIGNED_OUT' || previousUserId !== activeUserId) {
+    sessionRevision += 1;
     sessionPromise = undefined;
+    // Listeners must remain synchronous and must not call auth RPCs here.
+    for (const listener of sessionListeners) listener(activeUserId);
   }
 });
+
+/** Observe identity changes without starting auth work inside the auth callback. */
+export function onSessionChange(listener: (userId: string | null) => void): () => void {
+  sessionListeners.add(listener);
+  return () => { sessionListeners.delete(listener); };
+}
 
 function throwIfError(error: { message: string } | null): void {
   if (error) throw new Error(error.message);
@@ -50,9 +66,13 @@ export function getUserId(): string | null {
 /** Restores the saved anonymous session or creates one for this browser. */
 export function ensureSession(): Promise<string> {
   if (sessionPromise) return sessionPromise;
-  sessionPromise = (async () => {
+  const revision = sessionRevision;
+  const pending = (async () => {
     const { data, error } = await supabase.auth.getSession();
     throwIfError(error);
+    if (revision !== sessionRevision && activeUserId !== data.session?.user.id) {
+      throw new Error('The browser session changed. Please retry.');
+    }
     if (data.session?.user.id) {
       activeUserId = data.session.user.id;
       return activeUserId;
@@ -61,12 +81,16 @@ export function ensureSession(): Promise<string> {
     throwIfError(signedIn.error);
     const id = signedIn.data.user?.id;
     if (!id) throw new Error('Anonymous sign-in did not return a user.');
+    if (revision !== sessionRevision && activeUserId !== id) {
+      throw new Error('The browser session changed. Please retry.');
+    }
     activeUserId = id;
     return id;
   })().catch((error: unknown) => {
-    sessionPromise = undefined;
+    if (sessionPromise === pending) sessionPromise = undefined;
     throw error;
   });
+  sessionPromise = pending;
   return sessionPromise;
 }
 
@@ -96,6 +120,32 @@ export async function joinTeam(id: string, invite: string): Promise<string> {
   throwIfError(error);
   if (typeof data !== 'string') throw new Error('Joining the team returned no team ID.');
   return data;
+}
+
+/** Discovers only teams accessible to the restored session, including linked libraries. */
+export async function fetchAccessibleTeams(): Promise<AccessibleTeam[]> {
+  await ensureSession();
+  const { data, error } = await supabase.rpc('accessible_teams');
+  throwIfError(error);
+  if (!Array.isArray(data)) throw new Error('Team discovery returned an invalid response.');
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  const teams = new Map<string, AccessibleTeam>();
+  for (const row of data as unknown[]) {
+    if (!row || typeof row !== 'object') throw new Error('Team discovery returned an invalid team.');
+    const { team_id: id, canonical_team_id: canonicalTeamId } = row as Record<string, unknown>;
+    if (typeof id !== 'string' || !uuid.test(id)
+      || typeof canonicalTeamId !== 'string' || !uuid.test(canonicalTeamId)) {
+      throw new Error('Team discovery returned an invalid team.');
+    }
+    const normalizedId = id.toLowerCase();
+    const normalizedCanonicalId = canonicalTeamId.toLowerCase();
+    const previous = teams.get(normalizedId);
+    if (previous && previous.canonicalTeamId !== normalizedCanonicalId) {
+      throw new Error('Team discovery returned conflicting destinations.');
+    }
+    teams.set(normalizedId, { id: normalizedId, canonicalTeamId: normalizedCanonicalId });
+  }
+  return [...teams.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function fromRow(row: Record<string, unknown>): RemoteAnswer {

@@ -42,3 +42,29 @@ See `plan.html`, `handoff.html`, and `review.html` for implementation and valida
 ## Shared backend
 
 The reproducible schema and private-storage policies are in `supabase/migrations/20261014000000_sharing.sql`. The browser uses the project URL and publishable key in `src/sharing.ts`; no server secret is bundled. Anonymous auth is enabled on the configured Supabase project. Invitations use a 32-byte random secret in the URL fragment, cleared immediately on arrival; the database stores its hash.
+
+### Cofounder library
+
+Answers combines every recording saved on this device with answers from the
+restored browser session's confirmed accessible teams. The Person dropdown
+filters Akhil, Prakrit, Aarav, historical names, and Unassigned. “Akhil Vemuri” is
+a display/filter alias for Akhil; stored attribution and ownership never change.
+A fresh browser needs its private team invite. Selecting a person does not
+recover another browser's identity or grant editing permission.
+
+The generic `20261015000000_team_library.sql` migration adds an administrator-only
+mapping and authenticated `accessible_teams()` RPC. An operator separately links
+only the reviewed teams; the migration contains no deployment-specific IDs or
+invitation secrets. Existing answer/storage policies still require the original
+owner for changes. Recordings, owners, private object paths and invitation hashes
+stay intact. New shared recordings use the confirmed canonical destination;
+offline recordings stay local until explicitly shared. Legacy invitations retain
+their original team ID and token independently of that destination.
+
+Operator validation is in `supabase/tests/team_library_validation.sql` (transaction
+and rollback); pass the reviewed canonical/legacy UUIDs as psql variables. The
+rollback script is a dry run by default and restores the prior membership
+function without deleting recordings. Actual private byte downloads and live
+invite joins still need operator QA. Browser QA uses mocked backend data:
+`VCRECORD_TEST_URL=http://127.0.0.1:4174/ node tests/team-library-browser-check.mjs`.
+Stop the task-owned localhost server after active testing. No lint script exists.

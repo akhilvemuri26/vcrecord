@@ -84,7 +84,7 @@ try {
   console.log('PASS: real IndexedDB delayed completion preserves newer draft; second save and reload retain it');
 
   await page.locator('#practice-nav').click();
-  await page.locator('#person').fill('Tester');
+  await page.locator('#person').selectOption('Akhil');
   await page.locator('#record').click();
   await page.locator('#stop').waitFor({ state: 'visible' });
   await page.waitForTimeout(1100);

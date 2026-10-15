@@ -5,10 +5,10 @@ import { questions, tips } from "./questions";
 import { startCapture, startMediaTest } from "./capture";
 import { analyzeAudio, EMPTY_TRANSCRIPT_MESSAGE } from "./audio-analysis";
 import { readTiming, validTiming } from "./timing";
-import { listAnswers, listSyncRecords, getAnswer, saveAnswer, updateAnswer, type Answer, type RemotePendingAnswer } from "./storage";
+import { listAnswers, listSyncRecords, getAnswer, saveAnswer, updateAnswer, type Answer } from "./storage";
 import * as sharing from "./sharing";
 import { drainSync, assignTeam, markDeleted, queueRemoteEdit, queueRemoteDelete } from "./sync";
-type LibraryAnswer = Answer | sharing.RemoteAnswer | RemotePendingAnswer;
+import { projectLibrary, normalizePerson as personKey, personName as displayPerson, personOptions, filterLibrary, selectLibraryAnswer, ALL_PEOPLE, type LibraryAnswer } from "./library";
 function captureInvitation() {
     const fragment = new URLSearchParams(location.hash.slice(1));
     if (!fragment.has("team") || !fragment.has("invite")) return false;
@@ -18,12 +18,20 @@ function captureInvitation() {
 }
 captureInvitation();
 const stored = (key: string) => { try { return localStorage.getItem(key); } catch { return null; } };
-let team: { id: string; invite?: string } | undefined;
-try { team = JSON.parse(localStorage.getItem("vcrecord-team") ?? "null") ?? undefined; } catch {}
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+type Invite = { id: string; invite: string };
+function readTeam(value: string | null): { id: string; invite?: string } | undefined {
+    try { const parsed = JSON.parse(value ?? "null"); if (parsed && typeof parsed.id === "string" && uuid.test(parsed.id) && (parsed.invite === undefined || (typeof parsed.invite === "string" && /^[0-9a-f]{64}$/i.test(parsed.invite)))) return parsed; } catch {}
+}
+let team = readTeam(stored("vcrecord-team"));
+let invitation = readTeam(stored("vcrecord-invitation")) as Invite | undefined;
+if (!invitation?.invite && team?.invite) invitation = { id: team.id, invite: team.invite };
+let accessibleTeams: string[] = [], confirmedUser: string | null = null, connectionGeneration = 0;
+let connecting = false;
 let remoteAnswers: sharing.RemoteAnswer[] = [];
 let remoteRefresh = 0, libraryRender = 0;
 const app = document.querySelector<HTMLDivElement>("#app")!;
-app.innerHTML = `<header><strong>VC Record</strong><nav aria-label="Main"><button id="practice-nav">Practice</button><button id="answers-nav">Answers</button></nav></header><main><div class="team-controls"><button id="create-team">Create shared team</button><button id="copy-invite" hidden>Copy invite</button><button id="refresh-team" hidden>Refresh / retry sync</button><button id="share-saved" hidden>Share saved answers</button><span id="team-status" role="status"></span></div><section id="practice"><h1 id="question" hidden></h1><p id="phase" class="position">Ready to practice</p><div class="timer" id="timer" aria-label="Seconds remaining" hidden>15</div><video id="preview" autoplay muted playsinline hidden aria-label="Camera preview"></video><p class="person-field"><label for="person">Answering as </label><input id="person" maxlength="80" autocomplete="name" placeholder="Your name"></p><div class="actions"><button id="record" class="primary">Start practice</button><button id="test-media">Test mic &amp; video</button><button id="cancel" hidden>Cancel</button><button id="stop" hidden>Stop &amp; save</button><button id="next">Next question</button></div><section id="media-test" class="media-test" aria-labelledby="media-test-title" hidden><h2 id="media-test-title" tabindex="-1">Test mic &amp; video</h2><p id="media-test-status" role="status" aria-live="polite"></p><video id="media-test-preview" muted playsinline aria-label="Test camera preview" hidden></video><div id="media-test-level" hidden><label for="media-test-meter">Microphone audio level</label><meter id="media-test-meter" min="0" max="1" value="0"></meter><span id="media-test-countdown" aria-hidden="true"></span></div><video id="media-test-player" controls playsinline aria-label="Test recording playback" hidden></video><p class="position">Test only — not saved or shared.</p><div class="actions"><button id="media-test-again" hidden>Try again</button><button id="media-test-close">Cancel</button></div></section><p id="status" class="status" role="status" aria-live="polite"></p><div class="actions" id="rescue" hidden><button id="rescue-download">Download unsaved recording</button><button id="rescue-retry">Retry saving</button></div><details id="timing-settings"><summary>Timing settings</summary><form id="timing-form" novalidate><label for="prep-seconds">Preparation seconds</label><input id="prep-seconds" type="number" min="1" max="120" step="1" required><label for="answer-seconds">Answer seconds</label><input id="answer-seconds" type="number" min="5" max="30" step="1" required><button>Save timing</button><p id="timing-error" role="status"></p></form></details><p id="timing-summary" class="position"></p><p id="tip" class="tip" hidden></p></section><section class="library" id="library" hidden><h1>Answers</h1><p><span id="library-context">Answers saved in this browser.</span></p><p><label for="group-by">Group answers by </label><select id="group-by"><option value="question">Question</option><option value="person">Person</option><option value="recent">Most recent</option></select></p><p id="library-status" role="status"></p><div class="library-layout"><ul class="answer-list" id="answer-list"></ul><div class="detail" id="detail"></div></div></section></main>`;
+app.innerHTML = `<header><strong>VC Record</strong><nav aria-label="Main"><button id="practice-nav">Practice</button><button id="answers-nav">Answers</button></nav></header><main><div class="team-controls"><strong>Cofounders · Akhil, Prakrit, Aarav</strong><button id="copy-invite" hidden>Copy invite</button><button id="refresh-team" hidden>Refresh / retry sync</button><button id="share-saved" hidden>Share saved answers</button><span id="team-status" role="status"></span></div><section id="practice"><h1 id="question" hidden></h1><p id="phase" class="position">Ready to practice</p><div class="timer" id="timer" aria-label="Seconds remaining" hidden>15</div><video id="preview" autoplay muted playsinline hidden aria-label="Camera preview"></video><p class="person-field"><label for="person">Answering as </label><select id="person"><option value="">Choose a person</option><option>Akhil</option><option>Prakrit</option><option>Aarav</option></select></p><div class="actions"><button id="record" class="primary">Start practice</button><button id="test-media">Test mic &amp; video</button><button id="cancel" hidden>Cancel</button><button id="stop" hidden>Stop &amp; save</button><button id="next">Next question</button></div><section id="media-test" class="media-test" aria-labelledby="media-test-title" hidden><h2 id="media-test-title" tabindex="-1">Test mic &amp; video</h2><p id="media-test-status" role="status" aria-live="polite"></p><video id="media-test-preview" muted playsinline aria-label="Test camera preview" hidden></video><div id="media-test-level" hidden><label for="media-test-meter">Microphone audio level</label><meter id="media-test-meter" min="0" max="1" value="0"></meter><span id="media-test-countdown" aria-hidden="true"></span></div><video id="media-test-player" controls playsinline aria-label="Test recording playback" hidden></video><p class="position">Test only — not saved or shared.</p><div class="actions"><button id="media-test-again" hidden>Try again</button><button id="media-test-close">Cancel</button></div></section><p id="status" class="status" role="status" aria-live="polite"></p><div class="actions" id="rescue" hidden><button id="rescue-download">Download unsaved recording</button><button id="rescue-retry">Retry saving</button></div><details id="timing-settings"><summary>Timing settings</summary><form id="timing-form" novalidate><label for="prep-seconds">Preparation seconds</label><input id="prep-seconds" type="number" min="1" max="120" step="1" required><label for="answer-seconds">Answer seconds</label><input id="answer-seconds" type="number" min="5" max="30" step="1" required><button>Save timing</button><p id="timing-error" role="status"></p></form></details><p id="timing-summary" class="position"></p><p id="tip" class="tip" hidden></p></section><section class="library" id="library" hidden><h1>Answers</h1><p><span id="library-context">Answers saved in this browser.</span></p><div class="library-filters"><label for="person-filter">Person <select id="person-filter"><option value="*">All people</option><option value="akhil">Akhil</option><option value="prakrit">Prakrit</option><option value="aarav">Aarav</option></select></label><label for="group-by">View <select id="group-by"><option value="recent">Most recent</option><option value="question">By question</option></select></label><span id="library-count" role="status"></span></div><p id="library-status" role="status"></p><div class="library-layout"><ul class="answer-list" id="answer-list"></ul><div class="detail" id="detail"></div></div></section></main>`;
 const el = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 let owner: {
     id: string;
@@ -39,7 +47,7 @@ try {
 }
 catch {
 }
-el<HTMLInputElement>("person").value = owner.name;
+el<HTMLSelectElement>("person").value = ["Akhil", "Prakrit", "Aarav"].find(name => personKey(owner.name) === name.toLowerCase()) ?? "";
 function saveOwner() {
     owner.name = el<HTMLInputElement>("person").value.trim();
     try {
@@ -49,11 +57,11 @@ function saveOwner() {
     }
 }
 el("person").onchange = saveOwner;
-const personName = (answer: LibraryAnswer): string => answer.person ?? "Unassigned";
-const personGroup = (answer: LibraryAnswer) => personName(answer).trim().toLocaleLowerCase();
+const personName = (answer: LibraryAnswer) => displayPerson(answer.person);
 const isLocal = (answer: LibraryAnswer): answer is Answer => "video" in answer;
 const mayEdit = (answer: LibraryAnswer) => !answer.ownerId || answer.ownerId === sharing.getUserId();
 el("group-by").onchange = () => void renderLibrary();
+el("person-filter").onchange = () => void renderLibrary();
 const status = (message: string) => {
     el("status").textContent = message;
 };
@@ -252,14 +260,15 @@ async function beginAttempt() {
     if (unsaved) { status("Save the unsaved answer, or download and discard it before practicing again."); return; }
     closeMediaTest();
     saveOwner();
-    if (!owner.name) { status("Enter your name, then start practice."); el("person").focus(); return; }
+    if (!owner.name) { status("Choose a person, then start practice."); el("person").focus(); return; }
     el<HTMLDetailsElement>("timing-settings").open = false;
     const token = ++generation;
     const abort = new AbortController(); attemptAbort = abort;
     const current = () => token === generation;
     const frozen = { ...currentQuestion }, selectedTiming = { ...timing };
     const person = owner.name, personId = owner.id;
-    const assignedTeam = team?.id, assignedOwner = sharing.getUserId();
+    const assignedOwner = sharing.getUserId();
+    const assignedTeam = !connecting && assignedOwner === confirmedUser && accessibleTeams.includes(team?.id ?? "") ? team?.id : undefined;
     phase = "setup"; question();
     el<HTMLButtonElement>("stop").disabled = false;
     el("preview").hidden = false; controls();
@@ -331,7 +340,8 @@ el("answers-nav").onclick = () => {
     cancelAttempt();
     el("practice").hidden = true;
     el("library").hidden = false;
-    void refreshRemote().then(() => renderLibrary());
+    void renderLibrary();
+    void refreshLibraryConnection().then(() => renderLibrary());
 };
 function queueWorker() {
     if (worker)
@@ -448,24 +458,31 @@ async function renderLibrary() {
     try {
         const records = await listSyncRecords();
         if (render !== libraryRender) return;
-        const answers: LibraryAnswer[] = [...records.filter(a => !a.deletedAt && (!a.teamId || a.teamId === team?.id)), ...remoteAnswers.filter(a => a.teamId === team?.id && !records.some(l => l.id === a.id))];
-        answers.sort((a,b) => b.createdAt - a.createdAt);
+        const currentUser = sharing.getUserId();
+        const teams = currentUser === confirmedUser ? accessibleTeams : [];
+        const allAnswers = projectLibrary(records, remoteAnswers, teams, currentUser);
+        const filter = el<HTMLSelectElement>("person-filter"), selectedPerson = filter.value;
+        const options = personOptions(allAnswers);
+        filter.replaceChildren(...options.map(({value, label}) => new Option(label, value)));
+        filter.value = options.some(option => option.value === selectedPerson) ? selectedPerson : ALL_PEOPLE;
         const groupBy = el<HTMLSelectElement>("group-by").value;
-        if (groupBy !== "recent")
-            answers.sort((a, b) => (groupBy === "person" ? personGroup(a).localeCompare(personGroup(b)) : questions.findIndex(q => q.id === a.questionId) - questions.findIndex(q => q.id === b.questionId)) || b.createdAt - a.createdAt);
+        const answers = filterLibrary(allAnswers, filter.value, groupBy === "question" ? "question" : "recent");
+        selectedId = selectLibraryAnswer(answers, selectedId)?.id;
+        el("library-count").textContent = `${answers.length} of ${allAnswers.length} recordings`;
         el("answers-nav").textContent = "Answers";
         const list = el("answer-list");
         list.replaceChildren();
         if (!answers.length) {
-            list.innerHTML = "<li class=\"empty\">Record your first answer to review it here.</li>";
+            const empty = document.createElement("li"); empty.className = "empty";
+            empty.textContent = filter.value !== ALL_PEOPLE ? `No recordings for ${filter.selectedOptions[0].textContent}. ` : "No recordings yet. Record your first answer to review it here.";
+            if (filter.value !== ALL_PEOPLE) { const reset = document.createElement("button"); reset.textContent = "Show all people"; reset.onclick = () => { filter.value = ALL_PEOPLE; void renderLibrary(); }; empty.append(reset); }
+            list.append(empty);
             selectedId = undefined;
         }
-        else if (!answers.some(a => a.id === selectedId))
-            selectedId = answers[0].id;
         let previousGroup = "";
         for (const a of answers) {
-            const groupId = groupBy === "question" ? a.questionId : groupBy === "person" ? personGroup(a) : "";
-            const group = groupBy === "question" ? a.question : groupBy === "person" ? personName(a) : "";
+            const groupId = groupBy === "question" ? a.questionId : "";
+            const group = groupBy === "question" ? a.question : "";
             if (groupId && groupId !== previousGroup) {
                 const heading = document.createElement("li");
                 heading.className = "group-heading";
@@ -474,10 +491,10 @@ async function renderLibrary() {
                 previousGroup = groupId;
             }
             const li = document.createElement("li"), button = document.createElement("button");
-            button.textContent = groupBy === "question" ? personName(a) : a.question;
+            button.textContent = a.question;
             button.setAttribute("aria-current", String(a.id === selectedId));
             const meta = document.createElement("small");
-            meta.textContent = `${personName(a)} · ${new Date(a.createdAt).toLocaleString()} · ${a.duration.toFixed(1)}s · ${a.edited ? "Edited transcript" : a.status} · ${isLocal(a) ? (a.syncState === "synced" ? "Shared" : a.syncState === "error" ? "Sync failed — retry" : a.teamId ? "Sync pending" : "Local") : "Shared"}`;
+            meta.textContent = `${personName(a)} · ${new Date(a.createdAt).toLocaleString()} · ${a.duration.toFixed(1)}s · ${a.status === "working" ? "Transcribing · " : a.status === "error" ? "Transcription failed · " : ""}${"syncState" in a && a.syncState === "error" ? "Upload failed — retry" : isLocal(a) ? (a.syncState === "synced" ? "Shared" : a.teamId ? "Upload pending" : "On this device") : "Shared"}`;
             button.append(meta);
             button.onclick = () => {
                 selectedId = a.id;
@@ -627,7 +644,7 @@ window.addEventListener("beforeunload", event => {
 });
 window.addEventListener("keydown", event => {
     const target = event.target as HTMLElement;
-    if (target.closest("button,textarea,input,video,a") || event.repeat || busy || el("practice").hidden)
+    if (target.closest("button,textarea,input,select,video,a") || event.repeat || busy || el("practice").hidden)
         return;
     if (event.code === "ArrowRight") {
         el("next").click();
@@ -637,7 +654,7 @@ window.addEventListener("keydown", event => {
 question();
 timingSummary();
 controls();
-status("Enter your name, then start practice. Recording begins automatically after preparation.");
+status("Choose a person, then start practice. Recording begins automatically after preparation.");
 void listAnswers().then(answers => {
     el("answers-nav").textContent = "Answers";
     for (const answer of answers)
@@ -645,54 +662,124 @@ void listAnswers().then(answers => {
             enqueue(answer.id);
 }).catch(error => status("Browser storage is unavailable. Recordings can still be downloaded: " + String(error)));
 
-function teamControls() {
-    el("create-team").hidden = !!team;
-    el("copy-invite").hidden = !team?.invite;
-    el("refresh-team").hidden = !team && !stored("vcrecord-pending-invite");
-    el("share-saved").hidden = !team;
-    el("library-context").textContent = team ? "Team answers and your saved local answers." : "Answers saved in this browser.";
+function savePreference() {
+    try {
+        if (team) localStorage.setItem("vcrecord-team", JSON.stringify({ id: team.id }));
+        else localStorage.removeItem("vcrecord-team");
+        if (invitation?.invite) localStorage.setItem("vcrecord-invitation", JSON.stringify(invitation));
+    } catch {}
 }
-async function refreshRemote() {
-    if (!team) return;
+function teamControls() {
+    const connected = !!team && confirmedUser === sharing.getUserId() && accessibleTeams.includes(team.id);
+    el("copy-invite").hidden = !connected || !invitation?.invite || !accessibleTeams.includes(invitation.id);
+    el("refresh-team").hidden = false;
+    el<HTMLButtonElement>("refresh-team").disabled = connecting;
+    el("share-saved").hidden = !connected;
+    el("library-context").textContent = connected ? "Shared cofounder answers and recordings on this device." : "Recordings on this device. Open your private team invite to connect a new browser.";
+    void listAnswers().then(answers => {
+        const count = answers.filter(a => !a.teamId).length;
+        el("share-saved").textContent = `Share saved answers (${count} local)`;
+        el<HTMLButtonElement>("share-saved").disabled = !count || connecting;
+    }).catch(() => {});
+}
+async function refreshRemote(): Promise<boolean> {
+    const user = sharing.getUserId(), teams = [...accessibleTeams], generation = connectionGeneration;
+    if (!user || user !== confirmedUser || !teams.length) return false;
     const refresh = ++remoteRefresh;
-    const teamId = team.id;
-    try { const answers = await sharing.fetchAnswers(teamId); if (refresh === remoteRefresh && team?.id === teamId) remoteAnswers = answers; }
-    catch (error) { el("team-status").textContent = "Team unavailable. Your local recordings are safe. Retry sync. " + String(error); }
+    // Two requests at a time; successful teams refresh even when another team is unavailable.
+    const results: PromiseSettledResult<sharing.RemoteAnswer[]>[] = [];
+    for (let i = 0; i < teams.length; i += 2) results.push(...await Promise.allSettled(teams.slice(i, i + 2).map(id => sharing.fetchAnswers(id))));
+    if (refresh !== remoteRefresh || generation !== connectionGeneration || sharing.getUserId() !== user) return false;
+    const failed: string[] = [];
+    for (let i = 0; i < results.length; i++) {
+        const result = results[i];
+        if (result.status === "fulfilled") remoteAnswers = [...remoteAnswers.filter(a => a.teamId !== teams[i]), ...result.value];
+        else failed.push(teams[i]);
+    }
+    if (failed.length) el("team-status").textContent = `Could not refresh ${failed.length} of ${teams.length} teams. Showing saved results and local recordings. Refresh / retry sync.`;
+    return !failed.length;
+}
+async function refreshLibraryConnection() {
+    const generation = connectionGeneration, user = sharing.getUserId();
+    const pendingRefresh = refreshRemote(), refresh = remoteRefresh;
+    const refreshed = await pendingRefresh;
+    const failures = (await listSyncRecords()).filter(a => a.syncState === "error" && a.ownerId === sharing.getUserId()).length;
+    if (refresh !== remoteRefresh || generation !== connectionGeneration || sharing.getUserId() !== user) return false;
+    if (failures) el("team-status").textContent = `${failures} uploads or changes failed. Recordings remain on this device. Refresh / retry sync.`;
+    else if (refreshed && team && confirmedUser === user && accessibleTeams.includes(team.id)) {
+        // The current refresh owns completion, including navigation that supersedes initialization.
+        el("team-status").textContent = "Shared cofounder library connected.";
+    }
+    if (!el("library").hidden) await renderLibrary();
+    return refreshed && !failures;
 }
 async function syncAndRefresh() {
-    await drainSync(() => { if (!el("library").hidden) return renderLibrary(); }); await refreshRemote();
-    if (!el("library").hidden) await renderLibrary();
+    await drainSync(() => { if (!el("library").hidden) return renderLibrary(); });
+    return refreshLibraryConnection();
 }
 async function initializeTeam() {
+    const generation = ++connectionGeneration;
+    ++remoteRefresh; connecting = true; teamControls();
+    el("team-status").textContent = "Connecting to your cofounder library…";
     try {
-        if (team || stored("vcrecord-pending-invite")) await sharing.ensureSession();
-        const pending = JSON.parse(stored("vcrecord-pending-invite") ?? "null");
-        if (pending) {
+        const user = await sharing.ensureSession();
+        if (generation !== connectionGeneration) return;
+        if (confirmedUser !== user) { remoteAnswers = []; accessibleTeams = []; team = undefined; confirmedUser = null; }
+        const rawPending = stored("vcrecord-pending-invite");
+        const pending = readTeam(rawPending);
+        if (rawPending && !pending?.invite) { try { localStorage.removeItem("vcrecord-pending-invite"); } catch {} throw new Error("Invalid invitation. Open the original private invite again."); }
+        if (pending?.invite) {
             await sharing.joinTeam(pending.id, pending.invite);
-            team = pending; localStorage.setItem("vcrecord-team", JSON.stringify(team));
-            localStorage.removeItem("vcrecord-pending-invite");
+            if (generation !== connectionGeneration || sharing.getUserId() !== user) return;
+            invitation = { id: pending.id, invite: pending.invite };
+            try { localStorage.setItem("vcrecord-invitation", JSON.stringify(invitation)); localStorage.removeItem("vcrecord-pending-invite"); } catch {}
         }
-        teamControls(); await syncAndRefresh();
-        if (team) el("team-status").textContent = "Shared team connected.";
-    } catch (error) { el("team-status").textContent = "Could not connect to team. Refresh / retry sync. " + String(error); teamControls(); }
+        const memberships = await sharing.fetchAccessibleTeams();
+        if (generation !== connectionGeneration || sharing.getUserId() !== user) return;
+        const preference = team?.id ?? readTeam(stored("vcrecord-team"))?.id;
+        accessibleTeams = memberships.map(m => m.id); confirmedUser = user;
+        remoteAnswers = remoteAnswers.filter(a => accessibleTeams.includes(a.teamId));
+        const preferredMembership = memberships.find(m => m.id === preference);
+        const destination = preferredMembership?.canonicalTeamId ?? [...memberships].sort((a,b) => a.canonicalTeamId.localeCompare(b.canonicalTeamId))[0]?.canonicalTeamId;
+        const fallback = accessibleTeams.includes(preference ?? "") ? preference : [...accessibleTeams].sort()[0];
+        team = destination && accessibleTeams.includes(destination) ? { id: destination } : fallback ? { id: fallback } : undefined;
+        savePreference(); teamControls();
+        if (!el("library").hidden) await renderLibrary();
+        if (!team) { el("team-status").textContent = "Local practice ready. Open the private cofounder invite to connect this browser."; return; }
+        await syncAndRefresh();
+    } catch (error) {
+        if (generation !== connectionGeneration) return;
+        // Never use an unverified preference for new recording assignment.
+        team = undefined;
+        if (confirmedUser !== sharing.getUserId()) { remoteAnswers = []; accessibleTeams = []; confirmedUser = null; }
+        el("team-status").textContent = "Could not connect. Local recordings remain available. Refresh / retry sync. " + String(error);
+    } finally {
+        if (generation === connectionGeneration) { connecting = false; teamControls(); if (!el("library").hidden) void renderLibrary(); }
+    }
 }
-el("create-team").onclick = async () => {
-    const button = el<HTMLButtonElement>("create-team"); button.disabled = true;
-    try { await sharing.ensureSession(); team = await sharing.createTeam("Cofounders"); localStorage.setItem("vcrecord-team", JSON.stringify(team)); teamControls(); el("team-status").textContent = "Team ready. Copy the invite for your cofounders."; }
-    catch (error) { el("team-status").textContent = "Could not create team. Try again. " + String(error); }
-    finally { button.disabled = false; }
-};
 el("copy-invite").onclick = async () => {
-    try { await navigator.clipboard.writeText(location.origin + location.pathname + "#team=" + team!.id + "&invite=" + team!.invite); el("team-status").textContent = "Invite copied."; }
+    if (!invitation?.invite) return;
+    try { await navigator.clipboard.writeText(location.origin + location.pathname + "#team=" + invitation.id + "&invite=" + invitation.invite); el("team-status").textContent = "Invite copied."; }
     catch { el("team-status").textContent = "Clipboard unavailable. Allow clipboard access and retry."; }
 };
 el("refresh-team").onclick = () => void initializeTeam();
 el("share-saved").onclick = async () => {
-    try { const userId = await sharing.ensureSession(); for (const answer of await listAnswers()) if (!answer.teamId) await assignTeam(answer.id, team!.id, userId); await syncAndRefresh(); el("team-status").textContent = "Saved answers assigned to this team. Failed uploads can be retried."; }
+    if (!team || confirmedUser !== sharing.getUserId() || !accessibleTeams.includes(team.id)) return;
+    const destination = team.id, userId = confirmedUser;
+    try { for (const answer of await listAnswers()) if (!answer.teamId) await assignTeam(answer.id, destination, userId!); await syncAndRefresh(); teamControls(); }
     catch (error) { el("team-status").textContent = String(error); }
 };
 window.addEventListener("online", () => void initializeTeam());
-window.addEventListener("focus", () => { if (!el("library").hidden) void syncAndRefresh(); });
+window.addEventListener("focus", () => { if (!el("library").hidden) void initializeTeam(); });
+sharing.onSessionChange(user => {
+    if (confirmedUser && confirmedUser !== user) {
+        ++connectionGeneration; ++remoteRefresh;
+        remoteAnswers = []; accessibleTeams = []; confirmedUser = null; team = undefined; connecting = false;
+        el("team-status").textContent = "Browser identity changed. Refresh to reconnect; local recordings remain available.";
+        teamControls();
+        el("detail").dataset.answerId = "";
+        if (!el("library").hidden) void renderLibrary();
+    }
+});
 teamControls(); void initializeTeam();
-
 window.addEventListener("hashchange", () => { if (captureInvitation()) void initializeTeam(); });
